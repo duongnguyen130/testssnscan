@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSN Sweep</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>SSN Sweep</h1>
+    <div class="stamp-note">Runs on this machine only</div>
+  </header>
+
+  <div class="panel">
+    <span class="field-label">Text to scan</span>
+
+    <div class="drop" id="dropzone">
+      <button type="button" id="pick">Choose a .txt file</button>
+      <p>or drop one here</p>
+      <input type="file" id="file" accept=".txt,.log,.csv,text/plain" hidden>
+    </div>
+
+    <div class="paste">
+      <span class="field-label">Or paste it</span>
+      <textarea id="text" spellcheck="false" placeholder="Paste the contents here."></textarea>
+    </div>
+
+    <div class="row">
+      <div>
+        <span class="field-label">Words of context</span>
+        <input type="number" id="words" value="30" min="1" max="200">
+      </div>
+      <div><button class="primary" id="scan">Scan</button></div>
+      <div><button id="clear">Clear</button></div>
+      <div class="hint" id="loaded"></div>
+    </div>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -147,7 +147,8 @@
         '<div class="body"><div class="excerpt">' +
         (f.words_before ? '<span class="ell">&hellip;</span> ' : "") +
         esc(f.before) + " " +
-        '<button class="hit" data-id="' + f.id + '" style="--d:' + (i * 0.035) + 's" ' +
+        '<button class="hit" data-id="' + f.id + '" style="--d:' +
+        Math.min(i * 0.03, 0.4) + 's" ' +
         'title="' + (open ? "Hide this number" : "Show this number") + '">' + val + "</button> " +
         esc(f.after) +
         (f.words_after ? ' <span class="ell">&hellip;</span>' : "") +

@@ -7,7 +7,8 @@
   --ink-2:  #55665C;
   --rule:   #BAC5B7;
   --stamp:  #A8271C;
-  --marker: #F4E85C;
+  --marker: #C4241B;
+  --redact: #7A130E;
   --warn:   #C99A2E;
   --display: "Arial Narrow", "Helvetica Neue Condensed", "Liberation Sans Narrow", "Nimbus Sans Narrow", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
@@ -228,45 +229,39 @@ label.inline {
 /* ---- the redaction bar you peel back ---- */
 
 .hit {
-  position: relative;
   display: inline-block;
-  padding: 1px 3px;
+  padding: 1px 4px;
   border: 0;
-  background: transparent;
   font-family: var(--mono);
   font-size: 13.5px;
   font-weight: 700;
   letter-spacing: 0;
   text-transform: none;
-  color: var(--ink);
+  color: #FFF;
   cursor: pointer;
-}
-.hit:hover { background: transparent; color: var(--ink); }
-.hit:focus-visible { outline: 2px solid var(--stamp); outline-offset: 2px; }
-
-.hit::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--marker);
-  transform: scaleX(0);
-  transform-origin: left;
-  z-index: -1;
+  background-color: transparent;
+  background-image: linear-gradient(var(--marker), var(--marker));
+  background-repeat: no-repeat;
+  background-position: left center;
+  background-size: 0 100%;
   animation: sweep .32s ease-out forwards;
   animation-delay: var(--d, 0s);
 }
-@keyframes sweep { to { transform: scaleX(1); } }
+.hit:hover { background-color: transparent; color: #FFF; filter: brightness(1.15); }
+.hit:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+@keyframes sweep { to { background-size: 100% 100%; } }
 
 .hit .bar {
   display: inline-block;
-  background: var(--ink);
+  background: var(--redact);
   color: transparent;
   border-radius: 1px;
   user-select: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hit::before { animation: none; transform: scaleX(1); }
+  .hit { animation: none; background-size: 100% 100%; }
 }
 
 /* ---- states ---- */

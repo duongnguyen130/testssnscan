@@ -13,10 +13,9 @@ is tagged, which lets the caller redact all of them.
 Python 3.7+, standard library only.
 """
 
-import bisect
 import re
 
-DEFAULT_CONTEXT_WORDS = 30
+DEFAULT_CONTEXT_CHARS = 30
 KEYWORD_WINDOW = 60          # chars either side to look for a label
 
 # 3-2-4 digits with an optional single dash or space between each group.
@@ -33,8 +32,6 @@ KEYWORD_PATTERN = re.compile(
     r"|so\s*bao\s*hiem\s*xa\s*hoi)",
     re.IGNORECASE,
 )
-
-WORD_PATTERN = re.compile(r"\S+")
 
 PLACEHOLDERS = {
     "123456789", "987654321", "111111111", "222222222", "333333333",
@@ -180,14 +177,27 @@ def _raw_matches(text):
     return found
 
 
-def scan_text(text, context_words=DEFAULT_CONTEXT_WORDS):
-    """Find every candidate SSN and return it with surrounding word context."""
+def _snap(lo, hi, matches):
+    """Widen a window so it never cuts a match in half.
+
+    A fixed character count lands wherever it lands, and a half-included
+    SSN would still render its last 4 digits. Swallow any overlapping
+    match whole instead.
+    """
+    for m in matches:
+        if m["end"] <= lo or m["start"] >= hi:
+            continue
+        lo = min(lo, m["start"])
+        hi = max(hi, m["end"])
+    return lo, hi
+
+
+def scan_text(text, context_chars=DEFAULT_CONTEXT_CHARS):
+    """Find every candidate SSN and return it with surrounding character context."""
     matches = _raw_matches(text)
     if not matches:
         return []
 
-    words = [(m.start(), m.end()) for m in WORD_PATTERN.finditer(text)]
-    word_starts = [w[0] for w in words]
     findings = []
 
     for n, mt in enumerate(matches, 1):
@@ -200,15 +210,10 @@ def scan_text(text, context_words=DEFAULT_CONTEXT_WORDS):
         level, points, reasons = score(mt["sep"], has_keyword, problems,
                                        mt["digits"])
 
-        # walk N words back and forward, then slice the original text between
-        # those offsets so the excerpt keeps its real spacing
-        i = max(bisect.bisect_right(word_starts, start) - 1, 0)
-        j = max(bisect.bisect_right(word_starts, end - 1) - 1, 0)
-        before_words = words[max(0, i - context_words):i]
-        after_words = words[j + 1:j + 1 + context_words]
-
-        lo = before_words[0][0] if before_words else start
-        hi = after_words[-1][1] if after_words else end
+        # N characters back and forward, snapped outward so no neighbouring
+        # match is sliced through
+        lo, _ = _snap(max(0, start - context_chars), start, matches)
+        _, hi = _snap(end, min(len(text), end + context_chars), matches)
 
         before = _segments(text, lo, start, matches)
         after = _segments(text, end, hi, matches)
@@ -231,8 +236,10 @@ def scan_text(text, context_words=DEFAULT_CONTEXT_WORDS):
             "valid_structure": not problems,
             "before": before,
             "after": after,
-            "words_before": len(before_words),
-            "words_after": len(after_words),
+            "chars_before": start - lo,
+            "chars_after": hi - end,
+            "more_before": lo > 0,
+            "more_after": hi < len(text),
             "neighbors": sum(1 for s in before + after if s["kind"] == "ssn"),
         })
 

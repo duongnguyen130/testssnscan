@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 SSN Sweep - scan text for possible Social Security Numbers and show the
-surrounding words for each hit.
+surrounding characters for each hit.
 
 This file is the entry point: run a scan from the command line, or serve the
 UI in static/ on loopback. Detection lives in detector.py.
@@ -14,7 +14,7 @@ Usage
   python ssn_scanner.py                      start the web UI on localhost:8000
   python ssn_scanner.py --port 8080          start on another port
   python ssn_scanner.py --file records.txt   scan from the command line instead
-  python ssn_scanner.py --file r.txt --words 50 --reveal
+  python ssn_scanner.py --file r.txt --chars 80 --reveal
 """
 
 import argparse
@@ -24,7 +24,7 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from detector import DEFAULT_CONTEXT_WORDS, excerpt, scan_text, summarize
+from detector import DEFAULT_CONTEXT_CHARS, excerpt, scan_text, summarize
 
 MAX_BYTES = 25 * 1024 * 1024          # refuse absurd payloads
 
@@ -48,7 +48,7 @@ ROUTES = {
 # command line mode
 # ---------------------------------------------------------------------------
 
-def run_cli(path, context_words, reveal):
+def run_cli(path, context_chars, reveal):
     if not os.path.isfile(path):
         print("No file at %s" % path, file=sys.stderr)
         return 2
@@ -56,7 +56,7 @@ def run_cli(path, context_words, reveal):
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
 
-    findings = scan_text(text, context_words)
+    findings = scan_text(text, context_chars)
     counts = summarize(findings)
 
     print("=" * 78)
@@ -139,18 +139,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
             text = payload.get("text") or ""
-            words = int(payload.get("context_words") or DEFAULT_CONTEXT_WORDS)
+            chars = int(payload.get("context_chars") or DEFAULT_CONTEXT_CHARS)
         except (ValueError, AttributeError):
             self._send(400, json.dumps({"error": "The request was malformed."}),
                        "application/json")
             return
 
-        words = max(1, min(words, 200))
-        findings = scan_text(text, words)
+        chars = max(1, min(chars, 2000))
+        findings = scan_text(text, chars)
         self._send(200, json.dumps({
             "findings": findings,
             "counts": summarize(findings),
-            "context_words": words,
+            "context_chars": chars,
         }), "application/json")
 
     def log_message(self, fmt, *args):
@@ -186,8 +186,8 @@ def main():
         description="Scan text for possible Social Security Numbers.")
     p.add_argument("--file",
                    help="scan this file from the command line instead of starting the UI")
-    p.add_argument("--words", type=int, default=DEFAULT_CONTEXT_WORDS,
-                   help="words of context on each side (default 30)")
+    p.add_argument("--chars", type=int, default=DEFAULT_CONTEXT_CHARS,
+                   help="characters of context on each side (default 30)")
     p.add_argument("--reveal", action="store_true",
                    help="print full numbers instead of redacting them")
     p.add_argument("--port", type=int, default=8000,
@@ -198,7 +198,7 @@ def main():
 
     try:
         if args.file:
-            return run_cli(args.file, max(1, args.words), args.reveal)
+            return run_cli(args.file, max(1, args.chars), args.reveal)
         return run_server(args.port, not args.no_browser)
     except BrokenPipeError:      # piping into head/more closed the stream
         return 0

@@ -75,8 +75,8 @@
     var text = $("text").value;
     if (!text.trim()) { fail("Add a file or paste some text first."); return; }
 
-    var n = parseInt($("words").value, 10);
-    if (isNaN(n) || n < 1) { n = 30; $("words").value = 30; }
+    var n = parseInt($("chars").value, 10);
+    if (isNaN(n) || n < 1) { n = 30; $("chars").value = 30; }
 
     var btn = $("scan");
     btn.disabled = true;
@@ -85,7 +85,7 @@
     fetch("/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text, context_words: n })
+      body: JSON.stringify({ text: text, context_chars: n })
     })
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -201,11 +201,11 @@
         "</div>" +
 
         '<div class="find-body"><div class="excerpt">' +
-        (f.words_before ? '<span class="ell">\u2026 </span>' : "") +
+        (f.more_before ? '<span class="ell">\u2026 </span>' : "") +
         side(f.before, f.id, open, delay) + " " +
         hit(f.value, f.last4, { id: f.id, open: open, focal: true, delay: delay }) +
         " " + side(f.after, f.id, open, delay) +
-        (f.words_after ? '<span class="ell"> \u2026</span>' : "") +
+        (f.more_after ? '<span class="ell"> \u2026</span>' : "") +
         "</div>";
 
       h += '<div class="reasons">';

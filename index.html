@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>SSN Sweep</title>
-<link rel="stylesheet" href="/style.css?v=2">
+<link rel="stylesheet" href="/style.css?v=3">
 </head>
 <body>
 
@@ -44,10 +44,10 @@
     </details>
 
     <div class="controls">
-      <label class="stepper" for="words">
+      <label class="stepper" for="chars">
         <span>Context</span>
-        <input type="number" id="words" value="30" min="1" max="200">
-        <span class="unit">words each side</span>
+        <input type="number" id="chars" value="30" min="1" max="2000">
+        <span class="unit">characters each side</span>
       </label>
       <span class="loaded" id="loaded"></span>
       <div class="actions">
@@ -61,6 +61,6 @@
 
 </main>
 
-<script src="/app.js?v=2"></script>
+<script src="/app.js?v=3"></script>
 </body>
 </html>

@@ -3,8 +3,12 @@
 """
 Detection engine for SSN Sweep.
 
-Pure logic: no HTTP, no printing, no file I/O. Import scan_text() from here
-and it will hand back every candidate SSN with word context around it.
+Pure logic: no HTTP, no printing, no file I/O.
+
+The important bit: context is returned as *segments*, not as a flat string.
+Record exports put several SSNs a few words apart, so one finding's context
+window routinely contains other people's numbers. Every match inside a window
+is tagged, which lets the caller redact all of them.
 
 Python 3.7+, standard library only.
 """
@@ -39,6 +43,10 @@ PLACEHOLDERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# scoring
+# ---------------------------------------------------------------------------
+
 def structural_problems(area, group, serial):
     """SSA allocation rules. Returns a list of human-readable reasons."""
     problems = []
@@ -59,23 +67,24 @@ def score(sep, has_keyword, problems, digits):
     """Turn the signals into high / medium / low plus the reasons why.
 
     Tune these weights against your own data. If the corpus is full of
-    9-digit account numbers, drop the bare-run branch or require a label.
+    9-digit account numbers, raise the bar on the bare-run branch or
+    require a label outright.
     """
     points = 0
     reasons = []
 
     if sep == "-":
         points += 4
-        reasons.append("written in 3-2-4 dashed form")
+        reasons.append("3-2-4 dashed form")
     elif sep == " ":
         points += 3
-        reasons.append("written in 3-2-4 spaced form")
+        reasons.append("3-2-4 spaced form")
     else:
-        reasons.append("bare 9-digit run, no separators")
+        reasons.append("bare 9-digit run")
 
     if has_keyword:
         points += 3
-        reasons.append("an SSN label appears nearby")
+        reasons.append("SSN label nearby")
 
     if problems:
         points -= 4
@@ -85,7 +94,7 @@ def score(sep, has_keyword, problems, digits):
 
     if digits in PLACEHOLDERS:
         points -= 2
-        reasons.append("well-known test or placeholder value")
+        reasons.append("known test value")
 
     if points >= 5:
         level = "high"
@@ -96,62 +105,122 @@ def score(sep, has_keyword, problems, digits):
     return level, points, reasons
 
 
-def _squash(s):
-    """Collapse whitespace runs so a snippet reads as one flowing line."""
-    return re.sub(r"\s+", " ", s).strip()
+# ---------------------------------------------------------------------------
+# context
+# ---------------------------------------------------------------------------
+
+def _collapse(s):
+    """Collapse whitespace runs, keeping edge spaces so segments still join."""
+    return re.sub(r"\s+", " ", s)
+
+
+def _segments(text, lo, hi, matches):
+    """Slice text[lo:hi] into plain-text and ssn segments.
+
+    Every match falling in the window becomes its own segment, so the caller
+    can redact all of them rather than only the focal one.
+    """
+    segs = []
+    cursor = lo
+
+    for m in matches:
+        if m["end"] <= lo or m["start"] >= hi:
+            continue
+        s = max(m["start"], lo)
+        e = min(m["end"], hi)
+        if s > cursor:
+            segs.append({"kind": "text", "text": _collapse(text[cursor:s])})
+        segs.append({"kind": "ssn", "text": text[s:e], "last4": m["serial"]})
+        cursor = e
+
+    if cursor < hi:
+        segs.append({"kind": "text", "text": _collapse(text[cursor:hi])})
+
+    if segs and segs[0]["kind"] == "text":
+        segs[0]["text"] = segs[0]["text"].lstrip()
+    if segs and segs[-1]["kind"] == "text":
+        segs[-1]["text"] = segs[-1]["text"].rstrip()
+
+    return [s for s in segs if s["kind"] != "text" or s["text"]]
+
+
+def flatten(segments, mask=True):
+    """Flatten segments back to a string, redacting every SSN if asked."""
+    out = []
+    for s in segments:
+        if s["kind"] == "ssn":
+            out.append("***-**-" + s["last4"] if mask else s["text"])
+        else:
+            out.append(s["text"])
+    return "".join(out).strip()
+
+
+# ---------------------------------------------------------------------------
+# main entry point
+# ---------------------------------------------------------------------------
+
+def _raw_matches(text):
+    """All accepted candidate spans, in document order."""
+    found = []
+    for m in SSN_PATTERN.finditer(text):
+        area, sep1, group, sep2, serial = m.groups()
+        if sep1 != sep2:
+            # "123-45 6789" is a coincidence, not a formatted SSN
+            continue
+        found.append({
+            "start": m.start(),
+            "end": m.end(),
+            "value": m.group(0),
+            "area": area,
+            "group": group,
+            "serial": serial,
+            "sep": sep1,
+            "digits": area + group + serial,
+        })
+    return found
 
 
 def scan_text(text, context_words=DEFAULT_CONTEXT_WORDS):
     """Find every candidate SSN and return it with surrounding word context."""
+    matches = _raw_matches(text)
+    if not matches:
+        return []
+
     words = [(m.start(), m.end()) for m in WORD_PATTERN.finditer(text)]
     word_starts = [w[0] for w in words]
     findings = []
 
-    for m in SSN_PATTERN.finditer(text):
-        area, sep1, group, sep2, serial = m.groups()
-
-        # "123-45 6789" is a coincidence, not a formatted SSN.
-        if sep1 != sep2:
-            continue
-
-        digits = area + group + serial
-        start, end = m.start(), m.end()
+    for n, mt in enumerate(matches, 1):
+        start, end = mt["start"], mt["end"]
 
         window = text[max(0, start - KEYWORD_WINDOW):end + KEYWORD_WINDOW]
         has_keyword = bool(KEYWORD_PATTERN.search(window))
 
-        problems = structural_problems(area, group, serial)
-        level, points, reasons = score(sep1, has_keyword, problems, digits)
+        problems = structural_problems(mt["area"], mt["group"], mt["serial"])
+        level, points, reasons = score(mt["sep"], has_keyword, problems,
+                                       mt["digits"])
 
-        # word-based context: walk N tokens back and forward, then slice the
-        # original text between those offsets so spacing survives intact
+        # walk N words back and forward, then slice the original text between
+        # those offsets so the excerpt keeps its real spacing
         i = max(bisect.bisect_right(word_starts, start) - 1, 0)
         j = max(bisect.bisect_right(word_starts, end - 1) - 1, 0)
-        before = words[max(0, i - context_words):i]
-        after = words[j + 1:j + 1 + context_words]
+        before_words = words[max(0, i - context_words):i]
+        after_words = words[j + 1:j + 1 + context_words]
 
-        if before:
-            before_text = text[before[0][0]:start]
-        elif words:
-            before_text = text[words[i][0]:start]
-        else:
-            before_text = ""
+        lo = before_words[0][0] if before_words else start
+        hi = after_words[-1][1] if after_words else end
 
-        if after:
-            after_text = text[end:after[-1][1]]
-        elif words:
-            after_text = text[end:words[j][1]]
-        else:
-            after_text = ""
+        before = _segments(text, lo, start, matches)
+        after = _segments(text, end, hi, matches)
 
         last_nl = text.rfind("\n", 0, start)
 
         findings.append({
-            "id": len(findings) + 1,
-            "value": m.group(0),
-            "digits": digits,
-            "masked": "***-**-" + serial,
-            "last4": serial,
+            "id": n,
+            "value": mt["value"],
+            "digits": mt["digits"],
+            "masked": "***-**-" + mt["serial"],
+            "last4": mt["serial"],
             "offset": start,
             "line": text.count("\n", 0, start) + 1,
             "column": start - last_nl,
@@ -160,13 +229,24 @@ def scan_text(text, context_words=DEFAULT_CONTEXT_WORDS):
             "reasons": reasons,
             "labeled": has_keyword,
             "valid_structure": not problems,
-            "before": _squash(before_text),
-            "after": _squash(after_text),
-            "words_before": len(before),
-            "words_after": len(after),
+            "before": before,
+            "after": after,
+            "words_before": len(before_words),
+            "words_after": len(after_words),
+            "neighbors": sum(1 for s in before + after if s["kind"] == "ssn"),
         })
 
     return findings
+
+
+def excerpt(finding, reveal=False):
+    """One-line rendering of a finding's context, for the console."""
+    value = finding["value"] if reveal else finding["masked"]
+    return "%s  >>%s<<  %s" % (
+        flatten(finding["before"], not reveal),
+        value,
+        flatten(finding["after"], not reveal),
+    )
 
 
 def summarize(findings):
@@ -174,4 +254,5 @@ def summarize(findings):
     for f in findings:
         counts[f["confidence"]] += 1
     counts["total"] = len(findings)
+    counts["clustered"] = sum(1 for f in findings if f["neighbors"])
     return counts

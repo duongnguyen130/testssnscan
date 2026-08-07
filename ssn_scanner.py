@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SSN Sweep - scan text files for possible Social Security Numbers and show
-30 words of context on either side of every hit.
+SSN Sweep - scan text for possible Social Security Numbers and show the
+surrounding words for each hit.
 
-This file is the entry point. It does two jobs and nothing else: run a scan
-from the command line, or serve the UI in static/ on loopback.
-Detection lives in detector.py.
+This file is the entry point: run a scan from the command line, or serve the
+UI in static/ on loopback. Detection lives in detector.py.
 
 Python 3.7+, standard library only. Nothing is sent off the machine.
 
@@ -25,19 +24,18 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from detector import DEFAULT_CONTEXT_WORDS, scan_text, summarize
+from detector import DEFAULT_CONTEXT_WORDS, excerpt, scan_text, summarize
 
 MAX_BYTES = 25 * 1024 * 1024          # refuse absurd payloads
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Front end lives in static/. If you keep the files flat next to this script
-# instead, that works too.
+# Front end lives in static/. Flat next to this script also works.
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 if not os.path.isfile(os.path.join(STATIC_DIR, "index.html")):
     STATIC_DIR = BASE_DIR
 
-# Explicit whitelist. Anything not listed here is a 404, so no path traversal.
+# Explicit whitelist, so there is no path to traverse.
 ROUTES = {
     "/": ("index.html", "text/html"),
     "/index.html": ("index.html", "text/html"),
@@ -69,16 +67,17 @@ def run_cli(path, context_words, reveal):
 
     for f in findings:
         shown = f["value"] if reveal else f["masked"]
+        near = ("   %d other SSN(s) in this window" % f["neighbors"]) if f["neighbors"] else ""
         print("")
-        print("[%03d] %s   %s   line %d, col %d"
-              % (f["id"], f["confidence"].upper(), shown, f["line"], f["column"]))
+        print("[%03d] %s   %s   line %d, col %d%s"
+              % (f["id"], f["confidence"].upper(), shown, f["line"], f["column"], near))
         print("      why: %s" % "; ".join(f["reasons"]))
-        print("      ...%s  >>%s<<  %s..." % (f["before"], shown, f["after"]))
+        print("      ...%s..." % excerpt(f, reveal))
 
     if not findings:
-        print("\nNothing matched. The file has no 3-2-4 digit runs.")
+        print("\nNothing matched. The text has no 3-2-4 digit runs.")
     elif not reveal:
-        print("\n(values masked; pass --reveal to print them in full)")
+        print("\n(every number above is redacted; pass --reveal to print them)")
     return 0
 
 
@@ -87,7 +86,7 @@ def run_cli(path, context_words, reveal):
 # ---------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SSNSweep/1.1"
+    server_version = "SSNSweep/2.0"
 
     def _send(self, code, payload, ctype):
         if isinstance(payload, str):
@@ -95,7 +94,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -106,13 +107,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         filename, ctype = route
-        full = os.path.join(STATIC_DIR, filename)
         try:
-            with open(full, "rb") as fh:
+            with open(os.path.join(STATIC_DIR, filename), "rb") as fh:
                 self._send(200, fh.read(), ctype)
         except IOError:
-            self._send(500, "Missing %s. Keep static/ next to ssn_scanner.py."
-                       % filename, "text/plain")
+            self._send(500, "Missing %s. Keep it in static/ or beside "
+                            "ssn_scanner.py." % filename, "text/plain")
 
     def do_POST(self):
         if self.path != "/scan":
@@ -189,7 +189,7 @@ def main():
     p.add_argument("--words", type=int, default=DEFAULT_CONTEXT_WORDS,
                    help="words of context on each side (default 30)")
     p.add_argument("--reveal", action="store_true",
-                   help="print full numbers instead of masking them")
+                   help="print full numbers instead of redacting them")
     p.add_argument("--port", type=int, default=8000,
                    help="port for the web UI (default 8000)")
     p.add_argument("--no-browser", action="store_true",

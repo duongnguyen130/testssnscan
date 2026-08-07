@@ -3,45 +3,64 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>SSN Sweep</title>
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
-<div class="wrap">
 
-  <header>
-    <h1>SSN Sweep</h1>
-    <div class="stamp-note">Runs on this machine only</div>
-  </header>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">SSN Sweep</span>
+    </div>
+    <span class="pill pill-quiet">Loopback only &middot; nothing leaves this machine</span>
+  </div>
+</header>
 
-  <div class="panel">
-    <span class="field-label">Text to scan</span>
+<main class="shell">
 
-    <div class="drop" id="dropzone">
-      <button type="button" id="pick">Choose a .txt file</button>
-      <p>or drop one here</p>
+  <section class="card intake" aria-labelledby="intake-title">
+    <div class="card-head">
+      <h1 id="intake-title">Scan a file for exposed SSNs</h1>
+      <p class="sub">Every match is redacted until you choose to reveal it, including
+        other people's numbers that fall inside the same excerpt.</p>
+    </div>
+
+    <div class="dropzone" id="dropzone">
+      <div class="dropzone-icon" aria-hidden="true"></div>
+      <p class="dropzone-title">Drop a text file here</p>
+      <p class="dropzone-sub">.txt, .log or .csv &mdash; or
+        <button type="button" class="linkish" id="pick">browse for one</button>
+      </p>
       <input type="file" id="file" accept=".txt,.log,.csv,text/plain" hidden>
     </div>
 
-    <div class="paste">
-      <span class="field-label">Or paste it</span>
-      <textarea id="text" spellcheck="false" placeholder="Paste the contents here."></textarea>
-    </div>
+    <details class="paste">
+      <summary>Paste text instead</summary>
+      <textarea id="text" spellcheck="false" rows="6"
+        placeholder="Paste the contents here."></textarea>
+    </details>
 
-    <div class="row">
-      <div>
-        <span class="field-label">Words of context</span>
+    <div class="controls">
+      <label class="stepper" for="words">
+        <span>Context</span>
         <input type="number" id="words" value="30" min="1" max="200">
+        <span class="unit">words each side</span>
+      </label>
+      <span class="loaded" id="loaded"></span>
+      <div class="actions">
+        <button class="btn btn-ghost" id="clear">Clear</button>
+        <button class="btn btn-primary" id="scan">Scan</button>
       </div>
-      <div><button class="primary" id="scan">Scan</button></div>
-      <div><button id="clear">Clear</button></div>
-      <div class="hint" id="loaded"></div>
     </div>
-  </div>
+  </section>
 
-  <div id="out"></div>
-</div>
+  <div id="out" aria-live="polite"></div>
 
-<script src="/app.js"></script>
+</main>
+
+<script src="/app.js?v=2"></script>
 </body>
 </html>

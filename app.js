@@ -1,4 +1,6 @@
-/* SSN Sweep - front end. Talks to POST /scan and renders the findings. */
+/* SSN Sweep - front end.
+   Posts to /scan and renders findings. Every SSN in an excerpt is covered,
+   not just the focal one, so a card is safe to screenshot as-is. */
 
 (function () {
   "use strict";
@@ -9,7 +11,7 @@
     findings: [],
     counts: null,
     filter: "all",
-    revealed: {},
+    revealed: {},     // per-card override, keyed by finding id
     revealAll: false,
     name: "pasted text"
   };
@@ -24,7 +26,9 @@
     $("out").innerHTML = '<div class="err">' + esc(msg) + "</div>";
   }
 
-  /* ---- file intake ---- */
+  /* ------------------------------------------------------------------ *
+   * intake
+   * ------------------------------------------------------------------ */
 
   $("pick").addEventListener("click", function () { $("file").click(); });
   $("file").addEventListener("change", function (e) { load(e.target.files[0]); });
@@ -46,8 +50,8 @@
     r.onload = function () {
       $("text").value = r.result;
       state.name = f.name;
-      $("loaded").textContent =
-        f.name + " loaded, " + r.result.length.toLocaleString() + " characters";
+      $("loaded").textContent = f.name + " \u00b7 " +
+        r.result.length.toLocaleString() + " chars";
     };
     r.onerror = function () { fail("That file could not be read. Try a plain text file."); };
     r.readAsText(f);
@@ -63,7 +67,9 @@
     state.name = "pasted text";
   });
 
-  /* ---- scan ---- */
+  /* ------------------------------------------------------------------ *
+   * scan
+   * ------------------------------------------------------------------ */
 
   $("scan").addEventListener("click", function () {
     var text = $("text").value;
@@ -72,8 +78,9 @@
     var n = parseInt($("words").value, 10);
     if (isNaN(n) || n < 1) { n = 30; $("words").value = 30; }
 
-    $("scan").disabled = true;
-    $("scan").textContent = "Scanning";
+    var btn = $("scan");
+    btn.disabled = true;
+    btn.textContent = "Scanning\u2026";
 
     fetch("/scan", {
       method: "POST",
@@ -93,88 +100,147 @@
         fail("The scanner did not answer. Is the server still running?");
       })
       .finally(function () {
-        $("scan").disabled = false;
-        $("scan").textContent = "Scan";
+        btn.disabled = false;
+        btn.textContent = "Scan";
       });
   });
 
-  /* ---- render ---- */
+  /* ------------------------------------------------------------------ *
+   * render
+   * ------------------------------------------------------------------ */
+
+  /* One SSN inside an excerpt. Covered digits become a solid block sized
+     to how many characters it hides, so nothing is inferable from width. */
+  function hit(value, last4, opts) {
+    var open = opts.open;
+    var cls = "hit" + (opts.focal ? " focal" : "") + (open ? " open" : "");
+    var label = open ? "Hide this number" : "Show this number";
+    var inner;
+
+    if (open) {
+      inner = esc(value);
+    } else {
+      var hidden = Math.max(value.length - 4, 1);
+      inner = '<span class="cover" style="width:' + hidden + "ch;--d:" +
+        (opts.delay || 0) + 's"></span>' + esc(last4);
+    }
+
+    return '<button class="' + cls + '" data-id="' + opts.id + '" title="' +
+      label + '" aria-label="' + label + '">' + inner + "</button>";
+  }
+
+  /* Excerpt side: text segments plus every neighbouring SSN, all covered. */
+  function side(segments, id, open, delay) {
+    return segments.map(function (s) {
+      if (s.kind === "text") { return esc(s.text); }
+      return hit(s.text, s.last4, { id: id, open: open, focal: false, delay: delay });
+    }).join("");
+  }
 
   function render() {
     var out = $("out");
     var counts = state.counts;
 
     if (!counts || !counts.total) {
-      out.innerHTML = '<div class="empty"><strong>Clean</strong>' +
-        "No 3-2-4 digit run turned up in " + esc(state.name) + ".</div>";
+      out.innerHTML = '<div class="empty"><strong>Nothing found</strong>' +
+        "<span>No 3-2-4 digit run turned up in " + esc(state.name) +
+        ".</span></div>";
       return;
     }
 
-    var h = '<div class="tally">' +
-      "<div><b>" + counts.total + "</b><span>candidates</span></div>" +
-      '<div class="hi"><b>' + counts.high + "</b><span>high</span></div>" +
-      "<div><b>" + counts.medium + "</b><span>medium</span></div>" +
-      "<div><b>" + counts.low + "</b><span>low</span></div>" +
+    var h = '<section class="results">';
+
+    h += '<div class="stats">' +
+      '<div class="stat"><b>' + counts.total + "</b><span>candidates</span></div>" +
+      '<div class="stat is-high"><b>' + counts.high + "</b><span>high</span></div>" +
+      '<div class="stat is-medium"><b>' + counts.medium + "</b><span>medium</span></div>" +
+      '<div class="stat"><b>' + counts.low + "</b><span>low</span></div>" +
       "</div>";
 
-    h += '<div class="toolbar">';
+    if (counts.clustered) {
+      h += '<div class="notice"><span aria-hidden="true">\u25CF</span><div>' +
+        "<b>" + counts.clustered + " excerpt" + (counts.clustered === 1 ? "" : "s") +
+        " contain another person's SSN.</b> Those are covered too, so a card is " +
+        "safe to paste into a ticket while the reveal switch is off.</div></div>";
+    }
+
+    h += '<div class="toolbar"><div class="segmented">';
     ["all", "high", "medium", "low"].forEach(function (f) {
-      h += '<button class="chip" data-filter="' + f + '" aria-pressed="' +
+      h += '<button data-filter="' + f + '" aria-pressed="' +
         (state.filter === f) + '">' + f + "</button>";
     });
-    h += '<div class="right">' +
-      '<button id="reveal">' + (state.revealAll ? "Hide values" : "Reveal values") + "</button>" +
-      '<button id="csv">Export CSV</button>' +
-      '<button id="json">Export JSON</button>' +
-      "</div></div>";
+    h += "</div>";
 
-    h += '<label class="inline">' +
-      '<input type="checkbox" id="unmasked"> Put full numbers in the export file</label>';
+    h += '<div class="right">' +
+      '<label class="switch"><input type="checkbox" id="reveal"' +
+      (state.revealAll ? " checked" : "") + '><span class="track"></span>' +
+      "<span>Reveal numbers</span></label>" +
+      '<button class="btn btn-ghost btn-sm" id="csv">CSV</button>' +
+      '<button class="btn btn-ghost btn-sm" id="json">JSON</button>' +
+      "</div></div>";
 
     var shown = state.findings.filter(function (f) {
       return state.filter === "all" || f.confidence === state.filter;
     });
 
     shown.forEach(function (f, i) {
-      var open = state.revealAll || state.revealed[f.id];
-      var val = open
-        ? esc(f.value)
-        : '<span class="bar">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>' + esc(f.last4);
+      var open = state.revealAll || !!state.revealed[f.id];
+      var delay = Math.min(i * 0.03, 0.35);
 
-      h += '<div class="find ' + f.confidence + '">' +
-        '<div class="gutter"><span class="lvl">' + f.confidence + "</span>" +
-        "L" + f.line + "<br>col " + f.column + "<br>@" + f.offset + "</div>" +
-        '<div class="body"><div class="excerpt">' +
-        (f.words_before ? '<span class="ell">&hellip;</span> ' : "") +
-        esc(f.before) + " " +
-        '<button class="hit" data-id="' + f.id + '" style="--d:' +
-        Math.min(i * 0.03, 0.4) + 's" ' +
-        'title="' + (open ? "Hide this number" : "Show this number") + '">' + val + "</button> " +
-        esc(f.after) +
-        (f.words_after ? ' <span class="ell">&hellip;</span>' : "") +
+      h += '<article class="find ' + f.confidence + '">' +
+        '<div class="find-head">' +
+        '<span class="badge ' + f.confidence + '">' + f.confidence + "</span>" +
+        '<span class="locus">line ' + f.line + " \u00b7 col " + f.column +
+        " \u00b7 offset " + f.offset + "</span>" +
+        (f.neighbors
+          ? '<span class="badge">+' + f.neighbors + " nearby</span>"
+          : "") +
+        '<div class="right">' +
+        '<button class="btn btn-ghost btn-sm copy" data-id="' + f.id +
+        '">Copy</button></div>' +
         "</div>" +
-        '<div class="why">' + esc(f.reasons.join(" \u00b7 ")) + "</div>" +
-        "</div></div>";
+
+        '<div class="find-body"><div class="excerpt">' +
+        (f.words_before ? '<span class="ell">\u2026 </span>' : "") +
+        side(f.before, f.id, open, delay) + " " +
+        hit(f.value, f.last4, { id: f.id, open: open, focal: true, delay: delay }) +
+        " " + side(f.after, f.id, open, delay) +
+        (f.words_after ? '<span class="ell"> \u2026</span>' : "") +
+        "</div>";
+
+      h += '<div class="reasons">';
+      f.reasons.forEach(function (r) { h += '<span class="reason">' + esc(r) + "</span>"; });
+      h += "</div></div></article>";
     });
 
     if (!shown.length) {
       h += '<div class="empty"><strong>Nothing at this level</strong>' +
-        "Pick another filter above.</div>";
+        "<span>Try another filter.</span></div>";
     }
 
+    h += "</section>";
     out.innerHTML = h;
     wire();
   }
 
+  /* ------------------------------------------------------------------ *
+   * events
+   * ------------------------------------------------------------------ */
+
+  function each(sel, fn) {
+    Array.prototype.forEach.call(document.querySelectorAll(sel), fn);
+  }
+
   function wire() {
-    Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (b) {
+    each(".segmented button", function (b) {
       b.addEventListener("click", function () {
         state.filter = b.getAttribute("data-filter");
         render();
       });
     });
 
-    Array.prototype.forEach.call(document.querySelectorAll(".hit"), function (b) {
+    // clicking any covered number toggles that whole card
+    each(".hit", function (b) {
       b.addEventListener("click", function () {
         var id = b.getAttribute("data-id");
         state.revealed[id] = !state.revealed[id];
@@ -182,44 +248,96 @@
       });
     });
 
-    $("reveal").addEventListener("click", function () {
-      state.revealAll = !state.revealAll;
+    $("reveal").addEventListener("change", function (e) {
+      state.revealAll = e.target.checked;
+      state.revealed = {};
       render();
+    });
+
+    each(".copy", function (b) {
+      b.addEventListener("click", function () {
+        var f = state.findings.filter(function (x) {
+          return String(x.id) === b.getAttribute("data-id");
+        })[0];
+        if (!f) { return; }
+        copy(plain(f, state.revealAll || !!state.revealed[f.id]), b);
+      });
     });
 
     $("csv").addEventListener("click", function () { download("csv"); });
     $("json").addEventListener("click", function () { download("json"); });
   }
 
-  /* ---- export ---- */
+  /* ------------------------------------------------------------------ *
+   * text output
+   * ------------------------------------------------------------------ */
+
+  function flat(segments, reveal) {
+    return segments.map(function (s) {
+      if (s.kind === "text") { return s.text; }
+      return reveal ? s.text : "***-**-" + s.last4;
+    }).join("");
+  }
+
+  function plain(f, reveal) {
+    return "line " + f.line + ", col " + f.column + " [" + f.confidence + "] " +
+      (reveal ? f.value : f.masked) + "\n" +
+      flat(f.before, reveal).trim() + "  >>" +
+      (reveal ? f.value : f.masked) + "<<  " +
+      flat(f.after, reveal).trim();
+  }
+
+  function copy(text, btn) {
+    var done = function () {
+      var old = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = old; }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { legacy(text, done); });
+    } else {
+      legacy(text, done);
+    }
+  }
+
+  function legacy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { /* ignore */ }
+    document.body.removeChild(ta);
+  }
 
   function download(kind) {
-    var box = $("unmasked");
-    var full = box && box.checked;
+    var reveal = state.revealAll;   // exports follow the reveal switch
 
     var rows = state.findings.map(function (f) {
       return {
         id: f.id,
         confidence: f.confidence,
-        value: full ? f.value : f.masked,
+        value: reveal ? f.value : f.masked,
         line: f.line,
         column: f.column,
         offset: f.offset,
+        neighbors: f.neighbors,
         reasons: f.reasons.join("; "),
-        before: f.before,
-        after: f.after
+        before: flat(f.before, reveal).trim(),
+        after: flat(f.after, reveal).trim()
       };
     });
 
     var blob, name;
     if (kind === "json") {
       blob = new Blob(
-        [JSON.stringify({ source: state.name, findings: rows }, null, 2)],
+        [JSON.stringify({ source: state.name, redacted: !reveal, findings: rows }, null, 2)],
         { type: "application/json" });
       name = "ssn-sweep.json";
     } else {
-      var cols = ["id", "confidence", "value", "line", "column",
-                  "offset", "reasons", "before", "after"];
+      var cols = ["id", "confidence", "value", "line", "column", "offset",
+                  "neighbors", "reasons", "before", "after"];
       var lines = [cols.join(",")];
       rows.forEach(function (r) {
         lines.push(cols.map(function (c) {

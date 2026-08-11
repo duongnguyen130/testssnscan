@@ -12,6 +12,9 @@
   // refuses preflight, so this doubles as the CSRF defence.
   var TOKEN = (/[?&]t=([^&#]+)/.exec(location.search) || [])[1] || "";
 
+  var IDLE_WIPE_MS = 10 * 60 * 1000;   // clear findings after this much quiet
+  var idleTimer = null;
+
   var state = {
     findings: [],
     counts: null,
@@ -30,6 +33,46 @@
   function fail(msg) {
     $("out").innerHTML = '<div class="err">' + esc(msg) + "</div>";
   }
+
+  /* Drop every copy this page is holding: the parsed findings, the pasted
+     text, the file handle, and the rendered DOM. Called on demand, when the
+     page is left, and after a quiet spell. */
+  function wipe(note) {
+    state.findings = [];
+    state.counts = null;
+    state.warnings = [];
+    state.revealed = {};
+    state.revealAll = false;
+    state.file = null;
+    state.name = "pasted text";
+    state.format = null;
+    state.detail = null;
+
+    $("text").value = "";
+    $("file").value = "";
+    $("loaded").textContent = "";
+    $("text").placeholder = "Paste the contents here.";
+    $("out").innerHTML = note
+      ? '<div class="empty"><strong>Cleared</strong><span>' + esc(note) +
+        "</span></div>"
+      : "";
+  }
+
+  function touchIdle() {
+    if (idleTimer) { clearTimeout(idleTimer); }
+    idleTimer = setTimeout(function () {
+      if (state.findings.length) {
+        wipe("Results were cleared after 10 minutes without activity.");
+      }
+    }, IDLE_WIPE_MS);
+  }
+
+  ["click", "keydown", "scroll"].forEach(function (evt) {
+    document.addEventListener(evt, touchIdle, { passive: true });
+  });
+
+  // leaving the page drops everything; nothing survives a reload
+  window.addEventListener("pagehide", function () { wipe(); });
 
   /* ------------------------------------------------------------------ *
    * intake
@@ -70,17 +113,7 @@
     r.readAsText(f);
   }
 
-  $("clear").addEventListener("click", function () {
-    $("text").value = "";
-    $("file").value = "";
-    $("loaded").textContent = "";
-    $("out").innerHTML = "";
-    state.findings = [];
-    state.counts = null;
-    state.name = "pasted text";
-    state.file = null;
-    $("text").placeholder = "Paste the contents here.";
-  });
+  $("clear").addEventListener("click", function () { wipe(); });
 
   /* ------------------------------------------------------------------ *
    * scan
@@ -132,6 +165,9 @@
         state.warnings = d.warnings || [];
         state.revealed = {};
         state.revealAll = false;
+        // the source text is no longer needed; the findings carry the context
+        $("text").value = "";
+        touchIdle();
         render();
       })
       .catch(function () {
@@ -195,6 +231,13 @@
       '<div class="stat"><b>' + counts.low + "</b><span>low</span></div>" +
       "</div>";
 
+    if (state.revealAll) {
+      h += '<div class="notice"><span aria-hidden="true">\u25CF</span><div>' +
+        "<b>Values are visible.</b> They are also in anything you copy or " +
+        "export while this is on, and the Windows clipboard keeps a history." +
+        "</div></div>";
+    }
+
     if (state.format && state.format !== "text") {
       h += '<div class="notice" style="background:var(--surface-2);' +
         'border-color:var(--line)"><span aria-hidden="true">\u25CB</span><div>' +
@@ -235,6 +278,7 @@
       "<span>Reveal numbers</span></label>" +
       '<button class="btn btn-ghost btn-sm" id="csv">CSV</button>' +
       '<button class="btn btn-ghost btn-sm" id="json">JSON</button>' +
+      '<button class="btn btn-ghost btn-sm" id="wipe">Wipe</button>' +
       "</div></div>";
 
     var shown = state.findings.filter(function (f) {
@@ -329,6 +373,9 @@
 
     $("csv").addEventListener("click", function () { download("csv"); });
     $("json").addEventListener("click", function () { download("json"); });
+    $("wipe").addEventListener("click", function () {
+      wipe("Everything this page was holding has been dropped.");
+    });
   }
 
   /* ------------------------------------------------------------------ *

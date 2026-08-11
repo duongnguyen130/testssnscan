@@ -32,12 +32,15 @@ Usage
 """
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
 import sys
+import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -46,6 +49,24 @@ from extract import ExtractionError, extract, locate
 
 MAX_BYTES = 25 * 1024 * 1024
 SOCKET_TIMEOUT = 20
+DEFAULT_IDLE_MINUTES = 30
+
+# Nothing in this program opens a file for writing except the optional audit
+# log, and that log never receives a digit from a scanned file. There is no
+# cache, no temp file, no database, and no state that survives the process.
+
+
+def wipe(buf):
+    """Overwrite a mutable buffer in place.
+
+    Honest scope: this zeroes the one copy we control, the raw upload. CPython
+    strings and bytes are immutable, so the decoded text and the findings
+    cannot be overwritten -- they are freed and their pages reused whenever
+    the allocator gets to them. Treat that as the floor of what any pure
+    Python tool can promise.
+    """
+    if isinstance(buf, bytearray) and buf:
+        buf[:] = bytes(len(buf))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -147,6 +168,34 @@ class Handler(BaseHTTPRequestHandler):
 
     token = ""
     allowed_hosts = ()
+    audit_path = ""
+    last_seen = [time.time()]
+
+    def _audit(self, source, meta, findings):
+        """Optional, off by default, and PII-free by construction.
+
+        Records that a scan happened and how many hits it produced. No value,
+        no excerpt, no digit from the file ever reaches this file.
+        """
+        if not self.audit_path:
+            return
+        counts = {"high": 0, "medium": 0, "low": 0}
+        for f in findings:
+            counts[f["confidence"]] += 1
+        line = json.dumps({
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source": source,
+            "format": meta.get("format"),
+            "total": len(findings),
+            "high": counts["high"],
+            "medium": counts["medium"],
+            "low": counts["low"],
+        })
+        try:
+            with open(self.audit_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except IOError:
+            pass
 
     # -- plumbing ----------------------------------------------------------
 
@@ -198,6 +247,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _guard(self):
         """Returns True when the request may proceed."""
+        self.last_seen[0] = time.time()
         if not self._host_ok():
             self._json(403, {"error": "Refused: this server only answers to "
                                       "127.0.0.1 or localhost."})
@@ -219,11 +269,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(413, {"error": "That file is over %d MB. Split it and "
                                       "scan the pieces." % (MAX_BYTES // 1048576)})
             return None
-        data = self.rfile.read(length)
-        if len(data) != length:
+        # bytearray, not bytes, so it can be zeroed once we are done with it
+        buf = bytearray(length)
+        view = memoryview(buf)
+        got = 0
+        while got < length:
+            n = self.rfile.readinto(view[got:])
+            if not n:
+                break
+            got += n
+        view.release()
+        if got != length:
+            wipe(buf)
             self._json(400, {"error": "The upload was truncated."})
             return None
-        return data
+        return buf
 
     def _respond(self, text, findings, meta, chars):
         self._json(200, {
@@ -282,23 +342,30 @@ class Handler(BaseHTTPRequestHandler):
         if raw is None:
             return
         try:
-            payload = json.loads(raw.decode("utf-8"))
-            text = payload.get("text") or ""
-            chars = int(payload.get("context_chars") or DEFAULT_CONTEXT_CHARS)
-        except (ValueError, AttributeError):
-            self._json(400, {"error": "The request was malformed."})
-            return
-        if not isinstance(text, str):
-            self._json(400, {"error": "The request was malformed."})
-            return
+            try:
+                payload = json.loads(bytes(raw).decode("utf-8"))
+                text = payload.get("text") or ""
+                chars = int(payload.get("context_chars") or DEFAULT_CONTEXT_CHARS)
+            except (ValueError, AttributeError):
+                self._json(400, {"error": "The request was malformed."})
+                return
+            if not isinstance(text, str):
+                self._json(400, {"error": "The request was malformed."})
+                return
 
-        chars = max(1, min(chars, 2000))
-        try:
-            text, findings, meta = analyze(text.encode("utf-8"), "pasted.txt", chars)
-        except ExtractionError as exc:
-            self._json(200, {"error": str(exc)})
-            return
-        self._respond(text, findings, meta, chars)
+            chars = max(1, min(chars, 2000))
+            body = bytearray(text.encode("utf-8"))
+            try:
+                text, findings, meta = analyze(body, "pasted.txt", chars)
+            except ExtractionError as exc:
+                self._json(200, {"error": str(exc)})
+                return
+            finally:
+                wipe(body)
+            self._audit("pasted text", meta, findings)
+            self._respond(text, findings, meta, chars)
+        finally:
+            wipe(raw)
 
     def handle_file(self):
         """Raw bytes in the body, filename in a header. No multipart needed."""
@@ -315,18 +382,21 @@ class Handler(BaseHTTPRequestHandler):
         chars = max(1, min(chars, 2000))
 
         try:
-            text, findings, meta = analyze(data, name, chars)
-        except ExtractionError as exc:
-            self._json(200, {"error": str(exc)})
-            return
-        except Exception:
-            # never surface a traceback to the page
-            self._json(200, {"error": "That file could not be parsed. If it is "
-                                      "a .xls or .doc, save it as .xlsx or "
-                                      "export it to text first."})
-            return
-
-        self._respond(text, findings, meta, chars)
+            try:
+                text, findings, meta = analyze(data, name, chars)
+            except ExtractionError as exc:
+                self._json(200, {"error": str(exc)})
+                return
+            except Exception:
+                # never surface a traceback to the page
+                self._json(200, {"error": "That file could not be parsed. If it "
+                                          "is a .xls or .doc, save it as .xlsx "
+                                          "or export it to text first."})
+                return
+            self._audit(name, meta, findings)
+            self._respond(text, findings, meta, chars)
+        finally:
+            wipe(data)
 
     # -- logging -----------------------------------------------------------
 
@@ -346,7 +416,49 @@ class Server(ThreadingHTTPServer):
         sys.stderr.write("  dropped a malformed connection\n")
 
 
-def run_server(port, open_browser, token):
+FINGERPRINT_FILES = ["detector.py", "extract.py", "ssn_scanner.py",
+                     os.path.join("static", "index.html"),
+                     os.path.join("static", "style.css"),
+                     os.path.join("static", "app.js")]
+
+
+def run_fingerprint():
+    """Print a SHA-256 for each source file so modification is detectable."""
+    print("SHA-256 of each source file:")
+    for rel in FINGERPRINT_FILES:
+        path = os.path.join(BASE_DIR, rel)
+        if not os.path.isfile(path) and rel.startswith("static"):
+            path = os.path.join(BASE_DIR, os.path.basename(rel))
+        try:
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            print("  %s  %s" % (digest, rel))
+        except IOError:
+            print("  %-64s %s  (missing)" % ("-", rel))
+    print("\nRecord these once, then re-run --fingerprint to confirm nothing "
+          "has changed.")
+    return 0
+
+
+def _idle_watchdog(server, minutes):
+    """Shut the server down after a quiet spell so it is not left running."""
+    limit = minutes * 60
+
+    def loop():
+        while True:
+            time.sleep(15)
+            if time.time() - Handler.last_seen[0] > limit:
+                sys.stderr.write("\n  Idle for %d minutes. Shutting down and "
+                                 "dropping everything in memory.\n" % minutes)
+                server.shutdown()
+                return
+
+    t = threading.Thread(target=loop)
+    t.daemon = True
+    t.start()
+
+
+def run_server(port, open_browser, token, idle_minutes, audit_path):
     if not os.path.isfile(os.path.join(STATIC_DIR, "index.html")):
         print("index.html not found. Keep it in static/ or beside this script.",
               file=sys.stderr)
@@ -354,6 +466,8 @@ def run_server(port, open_browser, token):
 
     Handler.token = token
     Handler.allowed_hosts = ("127.0.0.1:%d" % port, "localhost:%d" % port)
+    Handler.audit_path = audit_path
+    Handler.last_seen[0] = time.time()
 
     server = Server(("127.0.0.1", port), Handler)
     url = "http://127.0.0.1:%d/" % port
@@ -363,7 +477,15 @@ def run_server(port, open_browser, token):
     print("SSN Sweep is up at:")
     print("  %s" % url)
     print("Loopback only, and the ?t= token is required. It changes every run.")
+    print("Nothing is written to disk. Everything is dropped when this stops.")
+    if audit_path:
+        print("Audit log (counts only, no values): %s" % audit_path)
+    if idle_minutes:
+        print("Shuts itself down after %d idle minutes." % idle_minutes)
     print("Ctrl+C to stop.")
+
+    if idle_minutes:
+        _idle_watchdog(server, idle_minutes)
 
     if open_browser:
         try:
@@ -395,13 +517,23 @@ def main():
     p.add_argument("--token", help="use this access token instead of a random one")
     p.add_argument("--no-token", action="store_true",
                    help="disable the access token (any local process can then scan)")
+    p.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_MINUTES,
+                   metavar="MIN",
+                   help="shut down after this many idle minutes (0 disables)")
+    p.add_argument("--audit", metavar="PATH",
+                   help="append a PII-free record of each scan to this file")
+    p.add_argument("--fingerprint", action="store_true",
+                   help="print a SHA-256 for each source file and exit")
     args = p.parse_args()
 
     try:
+        if args.fingerprint:
+            return run_fingerprint()
         if args.file:
             return run_cli(args.file, max(1, args.chars), args.reveal)
         token = "" if args.no_token else (args.token or secrets.token_urlsafe(24))
-        return run_server(args.port, not args.no_browser, token)
+        return run_server(args.port, not args.no_browser, token,
+                          max(0, args.idle_timeout), args.audit or "")
     except BrokenPipeError:
         return 0
 

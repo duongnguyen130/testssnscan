@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>SSN Sweep</title>
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=6">
 </head>
 <body>
 
@@ -31,10 +31,10 @@
     <div class="dropzone" id="dropzone">
       <div class="dropzone-icon" aria-hidden="true"></div>
       <p class="dropzone-title">Drop a text file here</p>
-      <p class="dropzone-sub">.txt, .log or .csv &mdash; or
+      <p class="dropzone-sub">.txt, .csv, .tsv, .xlsx or .pdf &mdash; or
         <button type="button" class="linkish" id="pick">browse for one</button>
       </p>
-      <input type="file" id="file" accept=".txt,.log,.csv,text/plain" hidden>
+      <input type="file" id="file" accept=".txt,.log,.csv,.tsv,.xlsx,.xlsm,.pdf,text/plain" hidden>
     </div>
 
     <details class="paste">
@@ -61,6 +61,6 @@
 
 </main>
 
-<script src="/app.js?v=3"></script>
+<script src="/app.js?v=6"></script>
 </body>
 </html>

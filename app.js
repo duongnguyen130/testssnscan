@@ -7,6 +7,11 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  // Per-run token from the URL the server printed. Sent as a custom header:
+  // a cross-origin page cannot set one without a preflight, and the server
+  // refuses preflight, so this doubles as the CSRF defence.
+  var TOKEN = (/[?&]t=([^&#]+)/.exec(location.search) || [])[1] || "";
+
   var state = {
     findings: [],
     counts: null,
@@ -44,16 +49,24 @@
     if (e.dataTransfer.files.length) { load(e.dataTransfer.files[0]); }
   });
 
+  var BINARY = /\.(xlsx|xlsm|xltx|pdf)$/i;
+
   function load(f) {
     if (!f) { return; }
+    state.name = f.name;
+    state.file = f;
+    $("loaded").textContent = f.name + " \u00b7 " +
+      Math.round(f.size / 1024).toLocaleString() + " KB";
+
+    if (BINARY.test(f.name)) {
+      // spreadsheets and PDFs are parsed server side; nothing to preview
+      $("text").value = "";
+      $("text").placeholder = f.name + " will be parsed when you press Scan.";
+      return;
+    }
     var r = new FileReader();
-    r.onload = function () {
-      $("text").value = r.result;
-      state.name = f.name;
-      $("loaded").textContent = f.name + " \u00b7 " +
-        r.result.length.toLocaleString() + " chars";
-    };
-    r.onerror = function () { fail("That file could not be read. Try a plain text file."); };
+    r.onload = function () { $("text").value = r.result; };
+    r.onerror = function () { fail("That file could not be read."); };
     r.readAsText(f);
   }
 
@@ -65,6 +78,8 @@
     state.findings = [];
     state.counts = null;
     state.name = "pasted text";
+    state.file = null;
+    $("text").placeholder = "Paste the contents here.";
   });
 
   /* ------------------------------------------------------------------ *
@@ -73,7 +88,11 @@
 
   $("scan").addEventListener("click", function () {
     var text = $("text").value;
-    if (!text.trim()) { fail("Add a file or paste some text first."); return; }
+    var binary = state.file && BINARY.test(state.file.name);
+    if (!binary && !text.trim()) {
+      fail("Add a file or paste some text first.");
+      return;
+    }
 
     var n = parseInt($("chars").value, 10);
     if (isNaN(n) || n < 1) { n = 30; $("chars").value = 30; }
@@ -82,16 +101,35 @@
     btn.disabled = true;
     btn.textContent = "Scanning\u2026";
 
-    fetch("/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text, context_chars: n })
-    })
+    var request = binary
+      ? fetch("/scan-file", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Auth-Token": TOKEN,
+            "X-Filename": state.file.name,
+            "X-Context-Chars": String(n)
+          },
+          body: state.file
+        })
+      : fetch("/scan", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Auth-Token": TOKEN
+          },
+          body: JSON.stringify({ text: text, context_chars: n })
+        });
+
+    request
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d.error) { fail(d.error); return; }
         state.findings = d.findings;
         state.counts = d.counts;
+        state.format = d.format;
+        state.detail = d.detail;
+        state.warnings = d.warnings || [];
         state.revealed = {};
         state.revealAll = false;
         render();
@@ -157,6 +195,26 @@
       '<div class="stat"><b>' + counts.low + "</b><span>low</span></div>" +
       "</div>";
 
+    if (state.format && state.format !== "text") {
+      h += '<div class="notice" style="background:var(--surface-2);' +
+        'border-color:var(--line)"><span aria-hidden="true">\u25CB</span><div>' +
+        "Parsed as <b>" + esc(state.format) + "</b> \u2014 " + esc(state.detail || "") +
+        "</div></div>";
+    }
+
+    (state.warnings || []).forEach(function (w) {
+      h += '<div class="notice" style="background:var(--surface-2);' +
+        'border-color:var(--line)"><span aria-hidden="true">\u25CB</span><div>' +
+        esc(w) + "</div></div>";
+    });
+
+    if (counts.already_masked) {
+      h += '<div class="notice" style="background:var(--surface-2);' +
+        'border-color:var(--line)"><span aria-hidden="true">\u25CB</span><div>' +
+        counts.already_masked + " value" + (counts.already_masked === 1 ? " was" : "s were") +
+        " already redacted in this file and are not counted below.</div></div>";
+    }
+
     if (counts.clustered) {
       h += '<div class="notice"><span aria-hidden="true">\u25CF</span><div>' +
         "<b>" + counts.clustered + " excerpt" + (counts.clustered === 1 ? "" : "s") +
@@ -190,10 +248,14 @@
       h += '<article class="find ' + f.confidence + '">' +
         '<div class="find-head">' +
         '<span class="badge ' + f.confidence + '">' + f.confidence + "</span>" +
-        '<span class="locus">line ' + f.line + " \u00b7 col " + f.column +
-        " \u00b7 offset " + f.offset + "</span>" +
+        '<span class="locus">' + esc(f.location || ("line " + f.line)) +
+        " \u00b7 col " + f.column + "</span>" +
+        (f.kind === "itin" ? '<span class="badge">ITIN</span>' : "") +
         (f.neighbors
           ? '<span class="badge">+' + f.neighbors + " nearby</span>"
+          : "") +
+        (f.occurrences > 1
+          ? '<span class="badge">\u00d7' + f.occurrences + "</span>"
           : "") +
         '<div class="right">' +
         '<button class="btn btn-ghost btn-sm copy" data-id="' + f.id +
@@ -208,7 +270,8 @@
         (f.more_after ? '<span class="ell"> \u2026</span>' : "") +
         "</div>";
 
-      h += '<div class="reasons">';
+      h += '<div class="reasons"><span class="reason">score ' +
+        (f.score > 0 ? "+" : "") + f.score + "</span>";
       f.reasons.forEach(function (r) { h += '<span class="reason">' + esc(r) + "</span>"; });
       h += "</div></div></article>";
     });
@@ -280,7 +343,8 @@
   }
 
   function plain(f, reveal) {
-    return "line " + f.line + ", col " + f.column + " [" + f.confidence + "] " +
+    return (f.location || ("line " + f.line)) + ", col " + f.column +
+      " [" + f.confidence + "] " +
       (reveal ? f.value : f.masked) + "\n" +
       flat(f.before, reveal).trim() + "  >>" +
       (reveal ? f.value : f.masked) + "<<  " +
@@ -319,6 +383,7 @@
         id: f.id,
         confidence: f.confidence,
         value: reveal ? f.value : f.masked,
+        location: f.location || ("line " + f.line),
         line: f.line,
         column: f.column,
         offset: f.offset,
@@ -336,8 +401,8 @@
         { type: "application/json" });
       name = "ssn-sweep.json";
     } else {
-      var cols = ["id", "confidence", "value", "line", "column", "offset",
-                  "neighbors", "reasons", "before", "after"];
+      var cols = ["id", "confidence", "value", "location", "line", "column",
+                  "offset", "neighbors", "reasons", "before", "after"];
       var lines = [cols.join(",")];
       rows.forEach(function (r) {
         lines.push(cols.map(function (c) {

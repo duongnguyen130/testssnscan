@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Detection engine for SSN Sweep.
+"""Detection engine for SSN Sweep. Pure logic: no HTTP, no I/O.
 
-Pure logic: no HTTP, no printing, no file I/O.
+An SSN carries no checksum, so nothing here can prove a match is real. Every
+signal is circumstantial and the output is a ranking, not a verdict.
 
-Two things worth knowing before tuning this:
-
-1. An SSN has no checksum. There is no arithmetic that separates a real one
-   from nine plausible digits. Everything below is circumstantial evidence,
-   so the output is a ranking, not a verdict.
-
-2. Every weight lives in WEIGHTS and every threshold in BANDS. Change them,
-   then run test_detector.py to see what the change did to precision and
-   recall. Tuning by eye moves both in directions you will not notice.
+Tuning surface: WEIGHTS holds every signal's point value, BANDS holds the two
+thresholds. Change either, then run test_detector.py to measure the effect on
+precision and recall.
 
 Python 3.7+, standard library only.
 """
@@ -27,32 +21,33 @@ DEFAULT_CONTEXT_CHARS = 30
 # tuning surface
 # ---------------------------------------------------------------------------
 
+# Point value of each signal. Format signals reward explicit SSN punctuation,
+# context signals reward or punish the words around the digits, and digit
+# signals judge the number itself against SSA allocation rules.
 WEIGHTS = {
-    # how the number is written
-    "sep_dash":        4,   # 123-45-6789
-    "sep_space":       3,   # 123 45 6789
-    "sep_dot":         2,   # 123.45.6789  (also matches some IDs)
-    "sep_none":        0,   # 123456789
+    "sep_dash":        4,
+    "sep_space":       3,
+    "sep_dot":         2,
+    "sep_none":        0,
 
-    # what sits around it
-    "label_adjacent":  5,   # "SSN:" immediately before the digits
-    "label_near":      3,   # a label somewhere in the window
-    "dob_near":        2,   # a birth date or DOB label alongside
-    "negative_near":  -4,   # "invoice no", "account", "phone" and friends
-    "currency":       -5,   # $ prefix, % suffix, decimal amount
-    "csv_header_pos":  5,   # the column header for this field says SSN
-    "csv_header_neg": -5,   # the column header says something else entirely
+    "label_adjacent":  5,
+    "label_near":      3,
+    "dob_near":        2,
+    "negative_near":  -4,
+    "currency":       -5,
+    "csv_header_pos":  5,
+    "csv_header_neg": -5,
 
-    # what the digits themselves are
     "valid":           1,
-    "invalid":        -5,   # violates SSA allocation rules
-    "placeholder":    -3,   # 111-11-1111, 123-45-6789, sequential runs
-    "repeated":       -2,   # same value all over the document
+    "invalid":        -5,
+    "placeholder":    -3,
+    "repeated":       -2,
 }
 
-BANDS = {"high": 6, "medium": 3}     # score >= high, >= medium, else low
+# Score >= high lands in "high", >= medium in "medium", anything less in "low".
+BANDS = {"high": 6, "medium": 3}
 
-REPEAT_LIMIT = 10          # occurrences before a value looks like a sentinel
+REPEAT_LIMIT = 10          # occurrences before a value reads as a sentinel
 LABEL_ADJACENT_GAP = 12    # chars allowed between a label and the digits
 LABEL_WINDOW = 60          # chars either side for a looser label search
 NEGATIVE_WINDOW = 40
@@ -64,16 +59,17 @@ NEGATIVE_WINDOW = 40
 DASHES = "-\u2013\u2014"            # hyphen, en dash, em dash
 _SEP = r"(?:[ \t]*[" + DASHES + r".][ \t]*|[ \t])"
 
-# The dot guards are conditional: a dot only disqualifies the match when it
-# joins another digit, i.e. part of a longer dotted run like an IP or a
-# version string. A plain sentence-ending period must not hide an SSN.
+# Three digits, two digits, four digits, with an optional consistent
+# separator between each group. The dot guards are conditional: a dot only
+# disqualifies the match when it joins another digit, so IP addresses and
+# version strings are excluded while a sentence-ending period is not.
 SSN_PATTERN = re.compile(
     r"(?<![0-9" + DASHES + r"])(?<![0-9]\.)"
     r"([0-9]{3})(" + _SEP + r"?)([0-9]{2})(" + _SEP + r"?)([0-9]{4})"
     r"(?![0-9" + DASHES + r"])(?!\.[0-9])"
 )
 
-# already-redacted values: XXX-XX-1234, ***-**-1234, XXXXX1234
+# Values someone has already redacted: XXX-XX-1234, ***-**-1234.
 MASKED_PATTERN = re.compile(
     r"(?<![0-9A-Za-z])[X*x#\u2022]{3}[- .]?[X*x#\u2022]{2}[- .]?([0-9]{4})(?![0-9])"
 )
@@ -126,11 +122,12 @@ def structural_problems(area, group, serial):
     return problems
 
 
-# ITIN group ranges, the 4th and 5th digits of a 9xx-xx-xxxx tax ID
+# Valid ITIN group ranges: the 4th and 5th digits of a 9xx-xx-xxxx tax ID.
 ITIN_GROUPS = [(50, 65), (70, 88), (90, 92), (94, 99)]
 
 
 def is_itin(area, group):
+    """True when a 9xx number falls in a range the IRS issues as an ITIN."""
     if area[0] != "9":
         return False
     g = int(group)
@@ -228,6 +225,7 @@ def _csv_column(text, start, end):
 
 
 def _currency_adjacent(text, start, end):
+    """True when a currency symbol or percent sign brackets the digits."""
     return bool(CURRENCY_BEFORE.search(text[max(0, start - 4):start])
                 or CURRENCY_AFTER.search(text[end:end + 8]))
 
@@ -331,6 +329,7 @@ def score_match(text, mt, occurrences):
 # ---------------------------------------------------------------------------
 
 def _collapse(s):
+    """Collapse whitespace runs, keeping edge spaces so segments still join."""
     return re.sub(r"\s+", " ", s)
 
 
@@ -369,6 +368,7 @@ def _snap(lo, hi, matches):
 
 
 def flatten(segments, mask=True):
+    """Join segments back into a string, redacting every SSN when mask is set."""
     out = []
     for s in segments:
         if s["kind"] == "ssn":
@@ -383,6 +383,7 @@ def flatten(segments, mask=True):
 # ---------------------------------------------------------------------------
 
 def _raw_matches(text):
+    """Every span matching the SSN shape, in document order.\n\n    Rejects mixed separators, so \"123-45 6789\" is treated as coincidence.\n    """
     found = []
     for m in SSN_PATTERN.finditer(text):
         area, sep1, group, sep2, serial = m.groups()
@@ -450,12 +451,14 @@ def count_already_masked(text):
 
 
 def excerpt(finding, reveal=False):
+    """Render one finding's context as a single console line."""
     value = finding["value"] if reveal else finding["masked"]
     return "%s  >>%s<<  %s" % (flatten(finding["before"], not reveal), value,
                                flatten(finding["after"], not reveal))
 
 
 def summarize(findings, text=None):
+    """Tally findings by band, plus counts of clustered, ITIN and pre-masked values."""
     counts = {"high": 0, "medium": 0, "low": 0}
     for f in findings:
         counts[f["confidence"]] += 1

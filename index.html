@@ -6,9 +6,11 @@
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>SSN Sweep</title>
-<link rel="stylesheet" href="/style.css?v=7">
+<link rel="stylesheet" href="/style.css?v=8">
 </head>
 <body>
+
+<!-- Static markup only. All state and rendering live in app.js. -->
 
 <header class="topbar">
   <div class="topbar-inner">
@@ -22,6 +24,7 @@
 
 <main class="shell">
 
+  <!-- Intake: drop target, optional paste box, and scan controls. -->
   <section class="card intake" aria-labelledby="intake-title">
     <div class="card-head">
       <h1 id="intake-title">Scan a file for exposed SSNs</h1>
@@ -59,10 +62,11 @@
     </div>
   </section>
 
+  <!-- Results are rendered here by app.js and cleared by its wipe(). -->
   <div id="out" aria-live="polite"></div>
 
 </main>
 
-<script src="/app.js?v=7"></script>
+<script src="/app.js?v=8"></script>
 </body>
 </html>

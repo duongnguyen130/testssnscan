@@ -1,14 +1,22 @@
-/* SSN Sweep - front end.
-   Posts to /scan and renders findings. Every SSN in an excerpt is covered,
-   not just the focal one, so a card is safe to screenshot as-is. */
+/* SSN Sweep front end.
+ *
+ * Posts to /scan for pasted text or /scan-file for spreadsheets and PDFs,
+ * then renders the findings.
+ *
+ * Two behaviours are deliberate and load-bearing:
+ *   - Every SSN inside an excerpt is covered, not only the focal one, so a
+ *     card is safe to screenshot even when neighbouring records hold PII.
+ *   - Nothing is retained. Results clear on idle, on leaving the page, and
+ *     on demand; the source text is dropped as soon as a scan returns.
+ */
 
 (function () {
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
 
-  // Per-run token from the URL the server printed. Sent as a custom header:
-  // a cross-origin page cannot set one without a preflight, and the server
+  // Per-run token from the URL the server printed, sent as a custom header.
+  // A cross-origin page cannot set one without a preflight, and the server
   // refuses preflight, so this doubles as the CSRF defence.
   var TOKEN = (/[?&]t=([^&#]+)/.exec(location.search) || [])[1] || "";
 
@@ -24,19 +32,22 @@
     name: "pasted text"
   };
 
+  /* Escape text for insertion into HTML. Every value from the server passes
+     through here before it reaches innerHTML. */
   function esc(s) {
     return String(s).replace(/[&<>"]/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
     });
   }
 
+  /* Replace the results area with an error message. */
   function fail(msg) {
     $("out").innerHTML = '<div class="err">' + esc(msg) + "</div>";
   }
 
-  /* Drop every copy this page is holding: the parsed findings, the pasted
-     text, the file handle, and the rendered DOM. Called on demand, when the
-     page is left, and after a quiet spell. */
+  /* Drop every copy this page holds: parsed findings, pasted text, the file
+     handle, and the rendered DOM. Called on demand, when the page is left,
+     and after a quiet spell. */
   function wipe(note) {
     state.findings = [];
     state.counts = null;
@@ -58,6 +69,7 @@
       : "";
   }
 
+  /* Restart the inactivity countdown. Any interaction defers the auto-wipe. */
   function touchIdle() {
     if (idleTimer) { clearTimeout(idleTimer); }
     idleTimer = setTimeout(function () {
@@ -71,7 +83,6 @@
     document.addEventListener(evt, touchIdle, { passive: true });
   });
 
-  // leaving the page drops everything; nothing survives a reload
   window.addEventListener("pagehide", function () { wipe(); });
 
   /* ------------------------------------------------------------------ *
@@ -94,6 +105,8 @@
 
   var BINARY = /\.(xlsx|xlsm|xltx|pdf)$/i;
 
+  /* Accept a chosen or dropped file. Text is previewed in the textarea;
+     spreadsheets and PDFs are held for the server to parse. */
   function load(f) {
     if (!f) { return; }
     state.name = f.name;
@@ -102,7 +115,6 @@
       Math.round(f.size / 1024).toLocaleString() + " KB";
 
     if (BINARY.test(f.name)) {
-      // spreadsheets and PDFs are parsed server side; nothing to preview
       $("text").value = "";
       $("text").placeholder = f.name + " will be parsed when you press Scan.";
       return;
@@ -165,7 +177,6 @@
         state.warnings = d.warnings || [];
         state.revealed = {};
         state.revealAll = false;
-        // the source text is no longer needed; the findings carry the context
         $("text").value = "";
         touchIdle();
         render();
@@ -183,8 +194,8 @@
    * render
    * ------------------------------------------------------------------ */
 
-  /* One SSN inside an excerpt. Covered digits become a solid block sized
-     to how many characters it hides, so nothing is inferable from width. */
+  /* Render one SSN. Covered digits become a solid block sized to the number
+     of characters it hides, so nothing is inferable from its width. */
   function hit(value, last4, opts) {
     var open = opts.open;
     var cls = "hit" + (opts.focal ? " focal" : "") + (open ? " open" : "");
@@ -203,7 +214,7 @@
       label + '" aria-label="' + label + '">' + inner + "</button>";
   }
 
-  /* Excerpt side: text segments plus every neighbouring SSN, all covered. */
+  /* Render one side of an excerpt: text plus every neighbouring SSN, covered. */
   function side(segments, id, open, delay) {
     return segments.map(function (s) {
       if (s.kind === "text") { return esc(s.text); }
@@ -211,6 +222,8 @@
     }).join("");
   }
 
+  /* Rebuild the entire results view from state. Cheap enough to call on
+     every toggle, which keeps reveal and filter state in one place. */
   function render() {
     var out = $("out");
     var counts = state.counts;
@@ -334,10 +347,12 @@
    * events
    * ------------------------------------------------------------------ */
 
+  /* querySelectorAll as a forEach, for older browser compatibility. */
   function each(sel, fn) {
     Array.prototype.forEach.call(document.querySelectorAll(sel), fn);
   }
 
+  /* Attach handlers after each render, since innerHTML discards the old ones. */
   function wire() {
     each(".segmented button", function (b) {
       b.addEventListener("click", function () {
@@ -346,7 +361,7 @@
       });
     });
 
-    // clicking any covered number toggles that whole card
+    // a click on any covered number toggles that whole card
     each(".hit", function (b) {
       b.addEventListener("click", function () {
         var id = b.getAttribute("data-id");
@@ -382,6 +397,7 @@
    * text output
    * ------------------------------------------------------------------ */
 
+  /* Flatten context segments to plain text for copy and export. */
   function flat(segments, reveal) {
     return segments.map(function (s) {
       if (s.kind === "text") { return s.text; }
@@ -389,6 +405,7 @@
     }).join("");
   }
 
+  /* Format one finding as pasteable text for a ticket. */
   function plain(f, reveal) {
     return (f.location || ("line " + f.line)) + ", col " + f.column +
       " [" + f.confidence + "] " +
@@ -398,6 +415,7 @@
       flat(f.after, reveal).trim();
   }
 
+  /* Copy to the clipboard, falling back to execCommand on older browsers. */
   function copy(text, btn) {
     var done = function () {
       var old = btn.textContent;
@@ -411,6 +429,7 @@
     }
   }
 
+  /* Clipboard fallback via a throwaway textarea. */
   function legacy(text, done) {
     var ta = document.createElement("textarea");
     ta.value = text;
@@ -422,8 +441,10 @@
     document.body.removeChild(ta);
   }
 
+  /* Build a CSV or JSON export in memory and hand it to the browser.
+     Values follow the reveal switch, so exports are redacted by default. */
   function download(kind) {
-    var reveal = state.revealAll;   // exports follow the reveal switch
+    var reveal = state.revealAll;
 
     var rows = state.findings.map(function (f) {
       return {

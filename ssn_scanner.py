@@ -9,19 +9,18 @@ file parsing in extract.py.
 
 Python 3.7+, standard library only. Nothing is sent off the machine.
 
-Hardening notes
----------------
-Binding to 127.0.0.1 is not by itself an access control. Any process or
-user on the box can reach a loopback port, and a web page in your browser
-can reach it too via DNS rebinding. So:
+Hardening
+---------
+Binding to loopback is not an access control on its own, so: Host and Origin
+are pinned to loopback against DNS rebinding, both scan endpoints require a
+per-run token in a custom header (which also defeats CSRF, since preflight is
+refused), responses carry a strict CSP, and sockets time out.
 
-  * Host and Origin are pinned to loopback. A rebound hostname is refused.
-  * Both scan endpoints require a per-run token, printed at startup and
-    carried in a custom header. Custom headers cannot be set by a simple
-    cross-origin form post, which kills CSRF, and a local process that
-    never saw the console output does not have the token.
-  * Responses carry a restrictive CSP and are marked no-store.
-  * Sockets time out, so a half-open connection cannot pin a thread.
+Retention
+---------
+Uploads are read into a mutable buffer and zeroed after each request. Nothing
+is written to disk except the optional audit log, which never receives a digit
+from a scanned file.
 
 Usage
 -----
@@ -51,19 +50,12 @@ MAX_BYTES = 25 * 1024 * 1024
 SOCKET_TIMEOUT = 20
 DEFAULT_IDLE_MINUTES = 30
 
-# Nothing in this program opens a file for writing except the optional audit
-# log, and that log never receives a digit from a scanned file. There is no
-# cache, no temp file, no database, and no state that survives the process.
-
-
 def wipe(buf):
     """Overwrite a mutable buffer in place.
 
-    Honest scope: this zeroes the one copy we control, the raw upload. CPython
-    strings and bytes are immutable, so the decoded text and the findings
-    cannot be overwritten -- they are freed and their pages reused whenever
-    the allocator gets to them. Treat that as the floor of what any pure
-    Python tool can promise.
+    Scope is limited to the one copy under our control, the raw upload.
+    CPython strings and bytes are immutable, so decoded text and findings can
+    only be freed, not overwritten.
     """
     if isinstance(buf, bytearray) and buf:
         buf[:] = bytes(len(buf))
@@ -80,7 +72,7 @@ ROUTES = {
     "/app.js": ("app.js", "application/javascript"),
 }
 
-# 'none' by default; only what this page actually uses is allowed back in.
+# Deny by default; only what this page actually uses is allowed back in.
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'none'; font-src 'none'; object-src 'none'; "
        "form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
@@ -91,7 +83,7 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
 # ---------------------------------------------------------------------------
 
 def analyze(data, filename, context_chars):
-    """Extract, scan, and tag each finding with where it actually lives."""
+    """Extract text, scan it, and tag each finding with its real location."""
     text, meta = extract(data, filename)
     findings = scan_text(text, context_chars)
     for f in findings:
@@ -104,6 +96,7 @@ def analyze(data, filename, context_chars):
 # ---------------------------------------------------------------------------
 
 def run_cli(path, context_chars, reveal):
+    """Scan one file and print the findings, redacted unless reveal is set."""
     if not os.path.isfile(path):
         print("No file at %s" % path, file=sys.stderr)
         return 2
@@ -161,6 +154,7 @@ def run_cli(path, context_chars, reveal):
 # ---------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
+    """Request handler for the local UI. Serves static files and two scan endpoints."""
     server_version = "SSNSweep"
     sys_version = ""                    # do not advertise the Python version
     protocol_version = "HTTP/1.0"
@@ -172,10 +166,10 @@ class Handler(BaseHTTPRequestHandler):
     last_seen = [time.time()]
 
     def _audit(self, source, meta, findings):
-        """Optional, off by default, and PII-free by construction.
+        """Append a PII-free record of one scan. Off unless --audit is given.
 
         Records that a scan happened and how many hits it produced. No value,
-        no excerpt, no digit from the file ever reaches this file.
+        excerpt, or digit from the file is ever written.
         """
         if not self.audit_path:
             return
@@ -200,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- plumbing ----------------------------------------------------------
 
     def _send(self, code, payload, ctype):
+        """Write a response with the full security header set."""
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         self.send_response(code)
@@ -218,28 +213,30 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _json(self, code, obj):
+        """Write a JSON response."""
         self._send(code, json.dumps(obj), "application/json")
 
     # -- request gates -----------------------------------------------------
 
     def _host_ok(self):
-        """Pin the Host header to loopback.
+        """Pin the Host header to loopback, defeating DNS rebinding.
 
-        A page on the internet can point a hostname it controls at 127.0.0.1
-        and then talk to this server from inside the browser. The requests
-        arrive with that attacker hostname in Host, so refusing anything
-        that is not literally loopback shuts the technique down.
+        A remote page can resolve a hostname it controls to 127.0.0.1 and
+        reach this server from inside the browser. Those requests carry the
+        attacker hostname in Host, so refusing anything else stops it.
         """
         host = (self.headers.get("Host") or "").strip().lower()
         return host in self.allowed_hosts
 
     def _origin_ok(self):
+        """Reject a cross-origin request. Same-origin GETs send no Origin at all."""
         origin = (self.headers.get("Origin") or "").strip().lower()
         if not origin:
-            return True                 # same-origin GETs send no Origin
+            return True
         return any(origin == "http://" + h for h in self.allowed_hosts)
 
     def _token_ok(self):
+        """Compare the request token against this run's token in constant time."""
         if not self.token:
             return True                 # --no-token
         sent = self.headers.get("X-Auth-Token") or ""
@@ -258,6 +255,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_body(self):
+        """Read the request body into a wipeable buffer, enforcing the size cap."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -269,7 +267,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json(413, {"error": "That file is over %d MB. Split it and "
                                       "scan the pieces." % (MAX_BYTES // 1048576)})
             return None
-        # bytearray, not bytes, so it can be zeroed once we are done with it
         buf = bytearray(length)
         view = memoryview(buf)
         got = 0
@@ -286,6 +283,7 @@ class Handler(BaseHTTPRequestHandler):
         return buf
 
     def _respond(self, text, findings, meta, chars):
+        """Send findings, counts and extraction metadata to the page."""
         self._json(200, {
             "findings": findings,
             "counts": summarize(findings, text),
@@ -298,14 +296,15 @@ class Handler(BaseHTTPRequestHandler):
     # -- verbs -------------------------------------------------------------
 
     def do_OPTIONS(self):
-        # No CORS. Refusing preflight is what keeps the custom auth header
-        # unreachable from another origin.
+        """Refuse preflight. This is what keeps the auth header unreachable cross-origin."""
         self._json(405, {"error": "Not allowed."})
 
     def do_HEAD(self):
+        """Answer HEAD the same way as GET, minus the body."""
         self.do_GET()
 
     def do_GET(self):
+        """Serve a whitelisted static file. Anything else is a 404."""
         if not self._guard():
             return
         route = ROUTES.get(self.path.split("?", 1)[0])
@@ -320,6 +319,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, "Missing %s." % filename, "text/plain")
 
     def do_POST(self):
+        """Gate on host, origin and token, then dispatch to a scan endpoint."""
         if not self._guard():
             return
         if not self._token_ok():
@@ -338,6 +338,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- endpoints ---------------------------------------------------------
 
     def handle_text(self):
+        """Scan text pasted into the page."""
         raw = self._read_body()
         if raw is None:
             return
@@ -368,7 +369,10 @@ class Handler(BaseHTTPRequestHandler):
             wipe(raw)
 
     def handle_file(self):
-        """Raw bytes in the body, filename in a header. No multipart needed."""
+        """Scan an uploaded file: raw bytes in the body, name in a header.
+
+        Avoiding multipart keeps the parsing surface to zero.
+        """
         data = self._read_body()
         if data is None:
             return
@@ -388,7 +392,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"error": str(exc)})
                 return
             except Exception:
-                # never surface a traceback to the page
                 self._json(200, {"error": "That file could not be parsed. If it "
                                           "is a .xls or .doc, save it as .xlsx "
                                           "or export it to text first."})
@@ -401,18 +404,21 @@ class Handler(BaseHTTPRequestHandler):
     # -- logging -----------------------------------------------------------
 
     def log_message(self, fmt, *args):
+        """Log the request line only. Bodies never reach the console."""
         sys.stderr.write("  %s\n" % (fmt % args))
 
     def log_error(self, fmt, *args):
+        """Log errors without a traceback."""
         sys.stderr.write("  %s\n" % (fmt % args))
 
 
 class Server(ThreadingHTTPServer):
+    """Threading server that stays quiet about malformed connections."""
     daemon_threads = True
     request_queue_size = 16
 
     def handle_error(self, request, client_address):
-        # default prints a traceback; say nothing useful to a prober
+        """Swallow the default traceback so a prober learns nothing."""
         sys.stderr.write("  dropped a malformed connection\n")
 
 
@@ -423,7 +429,7 @@ FINGERPRINT_FILES = ["detector.py", "extract.py", "ssn_scanner.py",
 
 
 def run_fingerprint():
-    """Print a SHA-256 for each source file so modification is detectable."""
+    """Print a SHA-256 per source file so later modification is detectable."""
     print("SHA-256 of each source file:")
     for rel in FINGERPRINT_FILES:
         path = os.path.join(BASE_DIR, rel)
@@ -441,10 +447,14 @@ def run_fingerprint():
 
 
 def _idle_watchdog(server, minutes):
-    """Shut the server down after a quiet spell so it is not left running."""
+    """Shut the server down after a quiet spell so it is not left running.
+
+    Guards against the tool sitting open all shift holding findings in memory.
+    """
     limit = minutes * 60
 
     def loop():
+        """Poll the last-activity stamp and stop the server once it goes stale."""
         while True:
             time.sleep(15)
             if time.time() - Handler.last_seen[0] > limit:
@@ -459,6 +469,7 @@ def _idle_watchdog(server, minutes):
 
 
 def run_server(port, open_browser, token, idle_minutes, audit_path):
+    """Start the local UI and block until stopped or idle."""
     if not os.path.isfile(os.path.join(STATIC_DIR, "index.html")):
         print("index.html not found. Keep it in static/ or beside this script.",
               file=sys.stderr)
@@ -502,6 +513,7 @@ def run_server(port, open_browser, token, idle_minutes, audit_path):
 
 
 def main():
+    """Parse arguments and dispatch to fingerprint, CLI, or server mode."""
     p = argparse.ArgumentParser(
         description="Scan text for possible Social Security Numbers.")
     p.add_argument("--file",

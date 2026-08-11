@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Text extraction for SSN Sweep.
+"""Text extraction for SSN Sweep.
 
-Turns an uploaded file into flat text plus a per-line locator, so a finding
-on line 12 can be reported as "Sheet1 row 12" or "page 3" instead of a
-meaningless line number.
+Turns an uploaded file into flat text plus a per-line locator, so a finding on
+line 12 can be reported as "Sheet1 row 12" or "page 3".
 
-Everything here is standard library. That is easy for xlsx (a zip of XML)
-and csv, and a real constraint for pdf -- see _pdf() for what it cannot do.
+Rows are joined with tabs rather than spaces so that detector.py's column
+header logic can still find field boundaries in tabular formats.
+
+Standard library only. That is comfortable for xlsx and csv, and a real
+constraint for pdf -- see _pdf for what it cannot do.
 
 Python 3.7+.
 """
@@ -30,12 +31,12 @@ NS_PKG = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 
 class ExtractionError(Exception):
+    """Raised when a file cannot be read, or is refused as hostile."""
     pass
 
 
-# A malicious file is small on disk and enormous once expanded. Every
-# decompression path below is bounded, and every XML document is checked for
-# entity declarations before a parser ever sees it.
+# Decompression bomb ceilings. A hostile file is small on disk and enormous
+# once expanded, so every inflate path below is bounded.
 MAX_EXPANDED = 200 * 1024 * 1024      # ceiling on total inflated bytes
 MAX_ONE_PART = 60 * 1024 * 1024       # ceiling on any single member/stream
 MAX_ZIP_RATIO = 200                   # inflated / stored, per member
@@ -98,6 +99,7 @@ def _decode(data):
 
 
 def _result(text, fmt, locators, warnings=None, detail=""):
+    """Package extracted text with its format, locators and any warnings."""
     return text, {
         "format": fmt,
         "locators": locators,      # one entry per line, 0-indexed
@@ -111,6 +113,7 @@ def _result(text, fmt, locators, warnings=None, detail=""):
 # ---------------------------------------------------------------------------
 
 def _plain(data):
+    """Decode a plain text file, one locator per line."""
     text = _decode(data)
     lines = text.count("\n") + 1
     return _result(text, "text", [{"label": "line %d" % (i + 1)}
@@ -123,6 +126,7 @@ def _plain(data):
 # ---------------------------------------------------------------------------
 
 def _csv(data, filename):
+    """Parse delimited text, sniffing the delimiter unless the name says .tsv.\n\n    Rows are re-joined with tabs so a quoted comma cannot fake a column\n    boundary downstream.\n    """
     text = _decode(data)
     sample = text[:8192]
 
@@ -158,6 +162,7 @@ def _csv(data, filename):
 # ---------------------------------------------------------------------------
 
 def _col_letter(index):
+    """Convert a zero-based column index to its spreadsheet letters."""
     letters = ""
     index += 1
     while index:
@@ -167,6 +172,7 @@ def _col_letter(index):
 
 
 def _shared_strings(zf):
+    """Read the workbook string table, flattening rich-text runs into one value."""
     try:
         raw = _safe_read(zf, "xl/sharedStrings.xml")
     except KeyError:
@@ -206,6 +212,7 @@ def _sheet_order(zf):
 
 
 def _cell_text(cell, shared):
+    """Resolve one cell to text, whether it is shared, inline, or numeric."""
     kind = cell.get("t")
     if kind == "inlineStr":
         return "".join(t.text or "" for t in cell.iter(NS_MAIN + "t"))
@@ -221,6 +228,7 @@ def _cell_text(cell, shared):
 
 
 def _xlsx(data):
+    """Extract every sheet of a workbook as tab-joined rows.\n\n    Guarded against zip bombs by total and per-member size, and against XML\n    entity expansion by _safe_xml.\n    """
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
@@ -277,13 +285,6 @@ def _xlsx(data):
 
 # ---------------------------------------------------------------------------
 # pdf
-#
-# No stdlib PDF library exists, so this is a deliberately small extractor:
-# inflate the content streams with zlib and pull the text-showing operators
-# back out. It handles the ordinary case of a text-based PDF with simple
-# fonts. It cannot handle encrypted files, scanned pages (that needs OCR),
-# or CID fonts whose glyph ids are not Unicode. Each of those is reported
-# rather than silently returning nothing.
 # ---------------------------------------------------------------------------
 
 def _pdf_strings(content):
@@ -400,6 +401,13 @@ def _decode_hex_string(raw):
 
 
 def _pdf(data):
+    """Extract text from a PDF by inflating its content streams.
+
+    Best effort by necessity: there is no PDF library in the standard
+    library. Encrypted files, scanned pages with no text layer, and unknown
+    compression filters are detected and reported rather than returning a
+    misleading empty result.
+    """
     if re.search(rb"/Encrypt\b", data):
         raise ExtractionError(
             "This PDF is encrypted. Decrypt or print it to a new PDF first.")
@@ -415,7 +423,6 @@ def _pdf(data):
             continue
         blob = data[start:end].rstrip(b"\r\n")
         try:
-            # bounded inflate; an unbounded one is a decompression bomb
             obj = zlib.decompressobj()
             inflated = obj.decompress(blob, MAX_ONE_PART)
             if obj.unconsumed_tail:

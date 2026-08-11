@@ -1,10 +1,12 @@
 /* ==========================================================================
-   SSN Sweep
+   SSN Sweep stylesheet
 
-   Neutral slate workspace. Red is reserved: it appears only on redacted
-   values and high-confidence signals, never as decoration, so a red block
-   on screen always means exposed PII.
-   Adapts to the OS light/dark setting.
+   Neutral slate workspace. Red is reserved and never decorative: it appears
+   only on redacted values and high-confidence signals, so a red block on
+   screen always means exposed PII. Follows the OS light/dark setting.
+
+   Sections: theme tokens, top bar, shell, intake, controls, results header,
+   finding cards, redaction, states, responsive.
    ========================================================================== */
 
 :root {

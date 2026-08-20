@@ -1,29 +1,17 @@
-/* ==========================================================================
-   SSN Scanner — collocated scoped stylesheet.
+/* SSN Scanner styles.
 
-   Blazor rewrites every selector here with this page's scope attribute, so
-   nothing can reach outside the component and the site stylesheet cannot
-   reach in.
+   Scoped to this component by Blazor. Classes are also sw- prefixed and
+   nested under .ssn-sweep so the file still behaves if it is ever served
+   as a plain stylesheet.
 
-   Two belts on top of that brace, so this file also behaves if it is ever
-   moved to wwwroot and linked as a plain stylesheet:
+   Colour is meaningful, not decorative:
+     red    a value that is actual PII, or a high-confidence hit
+     amber  a medium-confidence hit
+     yellow a keyword the scorer counted as a label signal
+*/
 
-     1. Every class is prefixed sw-. Blazor templates ship Bootstrap, which
-        already defines card, btn, badge, switch and toolbar.
-     2. Every rule is nested under .ssn-sweep.
-
-   Custom properties sit on .ssn-sweep rather than :root, because scoping
-   would rewrite :root to :root[b-xxxxx] and match nothing. Override them
-   from your own stylesheet to make this inherit the site palette.
-
-   Red is reserved and never decorative: it appears only on redacted values
-   and high-confidence signals, so a red block always means exposed PII.
-
-   Sections: tokens, cards, intake, controls, results header, finding cards,
-   redaction, states, responsive.
-   ========================================================================== */
-
-/* ---- tokens ---- */
+/* Theme tokens. Override these from your own stylesheet to
+   inherit the site palette. */
 
 .ssn-sweep {
     --sw-surface: #FFFFFF;
@@ -36,12 +24,13 @@
 
     --sw-red: #C7261B;
     --sw-red-deep: #8E1810;
+    --sw-red-muted: #B4675F;
     --sw-red-soft: #FDECEA;
     --sw-amber: #B45309;
     --sw-amber-soft: #FDF3E4;
     --sw-slate-soft: #EEF1F5;
-    --sw-mark: #D6E7F5;
-    --sw-mark-text: #1B4F72;
+    --sw-mark: #FDE68A;
+    --sw-mark-text: #3F2D00;
 
     --sw-radius: 14px;
     --sw-radius-sm: 9px;
@@ -60,6 +49,8 @@
     -webkit-font-smoothing: antialiased;
 }
 
+/* Dark theme tokens. */
+
 @media (prefers-color-scheme: dark) {
     .ssn-sweep {
         --sw-surface: #161B21;
@@ -72,12 +63,13 @@
 
         --sw-red: #E04A3C;
         --sw-red-deep: #B02B1E;
+        --sw-red-muted: #8E4B43;
         --sw-red-soft: #2A1614;
         --sw-amber: #E0A244;
         --sw-amber-soft: #241C10;
         --sw-slate-soft: #212932;
-        --sw-mark: #1B3145;
-        --sw-mark-text: #A6CDEB;
+        --sw-mark: #4A3A10;
+        --sw-mark-text: #FBD24E;
         --sw-shadow: 0 1px 2px rgba(0, 0, 0, .4);
     }
 }
@@ -88,7 +80,7 @@
     box-sizing: border-box;
 }
 
-/* ---- cards ---- */
+/* Panels. */
 
 .ssn-sweep .sw-card {
     background: var(--sw-surface);
@@ -116,7 +108,7 @@
     max-width: 62ch;
 }
 
-/* ---- intake ---- */
+/* File picker and paste box. */
 
 .ssn-sweep .sw-dropzone {
     border: 1.5px dashed var(--sw-line);
@@ -169,9 +161,6 @@
     font-size: 13.5px;
 }
 
-/* InputFile is a child component, so the scope attribute is never stamped on
-   the <input> it renders. ::deep is required to reach it. If this file is
-   moved to wwwroot as a plain stylesheet, delete the ::deep tokens instead. */
 .ssn-sweep .sw-dropzone ::deep input[type="file"] {
     display: block;
     margin: 14px auto 0;
@@ -224,7 +213,7 @@
     padding: 12px 14px;
 }
 
-/* ---- controls ---- */
+/* Context width, Scan and Clear. */
 
 .ssn-sweep .sw-controls {
     display: flex;
@@ -321,7 +310,7 @@
     border-radius: var(--sw-radius-sm);
 }
 
-/* ---- results header ---- */
+/* Result counts, warnings, filter and export bar. */
 
 .ssn-sweep .sw-results {
     margin-top: 28px;
@@ -429,64 +418,7 @@
     gap: 8px;
 }
 
-/* ---- reveal switch ---- */
-
-.ssn-sweep .sw-switch {
-    display: inline-flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 13.5px;
-    color: var(--sw-text-2);
-    cursor: pointer;
-    user-select: none;
-    margin: 0;
-}
-
-.ssn-sweep .sw-switch input {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-}
-
-.ssn-sweep .sw-track {
-    width: 38px;
-    height: 22px;
-    border-radius: 999px;
-    background: var(--sw-slate-soft);
-    border: 1px solid var(--sw-line);
-    position: relative;
-    transition: background .16s ease, border-color .16s ease;
-}
-
-.ssn-sweep .sw-track::after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--sw-surface);
-    box-shadow: 0 1px 3px rgba(15, 23, 42, .3);
-    transition: transform .16s ease;
-}
-
-.ssn-sweep .sw-switch input:checked + .sw-track {
-    background: var(--sw-red);
-    border-color: var(--sw-red);
-}
-
-.ssn-sweep .sw-switch input:checked + .sw-track::after {
-    transform: translateX(16px);
-}
-
-.ssn-sweep .sw-switch input:focus-visible + .sw-track {
-    outline: 2px solid var(--sw-red);
-    outline-offset: 2px;
-}
-
-/* ---- finding cards ---- */
+/* One finding: header badges, excerpt, score reasons. */
 
 .ssn-sweep .sw-find {
     background: var(--sw-surface);
@@ -531,13 +463,6 @@
     color: var(--sw-amber);
 }
 
-.ssn-sweep .sw-locus {
-    font-family: var(--sw-mono);
-    font-size: 12px;
-    color: var(--sw-text-3);
-    font-variant-numeric: tabular-nums;
-}
-
 .ssn-sweep .sw-find-body {
     padding: 16px;
 }
@@ -570,11 +495,14 @@
     padding: 3px 10px;
 }
 
-/* ---- label keywords ----
+/* Copied confirmation. */
 
-   Highlighted because the scorer treated them as a signal, so a highlight
-   always explains part of the score. Blue, never red: red is reserved for
-   values that are actually PII. */
+.ssn-sweep .sw-copied {
+    background: var(--sw-mark);
+    color: var(--sw-mark-text);
+}
+
+/* Keyword highlight. */
 
 .ssn-sweep .sw-label {
     background: var(--sw-mark);
@@ -584,30 +512,31 @@
     font-weight: 700;
 }
 
-/* ---- redaction: solid block over the hidden digits, click to peel ---- */
+/* Covered value. Click copies it; it is never shown. Sized to match the
+   keyword highlight, so neither reads as more important than the other.
+   The card's own match is the stronger red; neighbours are muted. */
 
 .ssn-sweep .sw-hit {
     font: inherit;
     font-family: var(--sw-mono);
-    font-size: 13px;
+    font-size: inherit;
     font-weight: 700;
     color: #FFF;
-    background: var(--sw-red);
+    background: var(--sw-red-muted);
     border: 0;
-    border-radius: 4px;
-    padding: 2px 5px;
+    border-radius: 3px;
+    padding: 1px 4px;
     cursor: pointer;
     white-space: nowrap;
-    transition: background .14s ease, box-shadow .14s ease;
-}
-
-.ssn-sweep .sw-hit:hover,
-.ssn-sweep .sw-hit.sw-open {
-    background: var(--sw-red-deep);
+    transition: background .14s ease;
 }
 
 .ssn-sweep .sw-hit.sw-focal {
-    box-shadow: 0 0 0 2px var(--sw-surface), 0 0 0 4px var(--sw-red);
+    background: var(--sw-red);
+}
+
+.ssn-sweep .sw-hit:hover {
+    background: var(--sw-red-deep);
 }
 
 .ssn-sweep .sw-cover {
@@ -619,7 +548,7 @@
     margin-right: 2px;
 }
 
-/* ---- states ---- */
+/* Empty and error states. */
 
 .ssn-sweep .sw-empty,
 .ssn-sweep .sw-err {
@@ -651,7 +580,7 @@
     font-size: 14px;
 }
 
-/* ---- responsive ---- */
+/* Narrow screens. */
 
 @media (max-width: 720px) {
     .ssn-sweep .sw-intake {

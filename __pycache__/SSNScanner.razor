@@ -13,11 +13,9 @@
 @using System.Xml.Linq
 
 @*
-    If this is a .NET 8 Blazor Web App with per-page render modes, uncomment
-    the line below or nothing will respond to clicks. On a classic Blazor
-    Server app every page is already interactive and the directive is an error.
-
-    @rendermode InteractiveServer
+    Needs an interactive render mode. On a .NET 8 Blazor Web App with per-page
+    modes, uncomment:  @rendermode InteractiveServer
+    On classic Blazor Server the page is already interactive.
 *@
 
 <PageHeader PageTitle="SSN Scanner" />
@@ -25,12 +23,8 @@
 
 @*START HTML*@
 
-@*
-    Segment template. Written as a templated Razor delegate so one piece of
-    markup serves the before, focal and after positions. An SSN renders as a
-    clickable cover block sized to the characters it hides, so nothing is
-    inferable from its width.
-*@
+@* Renders one piece of an excerpt: plain text, a highlighted keyword, or a
+   covered value. Values stay covered; clicking one copies it. *@
 @{
     RenderFragment<SegCtx> Seg = ctx =>
     @<text>
@@ -44,17 +38,11 @@
         }
         else
         {
-            <button type="button" class="@HitClass(ctx)" title="@HitTitle(ctx)"
-                    @onclick="() => ToggleOne(ctx.Id)">
-                @if (ctx.Open)
-                {
-                    @ctx.Seg.Text
-                }
-                else
-                {
-                    <span class="sw-cover"
-                          style="width:@(Math.Max(ctx.Seg.Text.Length - 4, 1))ch"></span>@ctx.Seg.Last4
-                }
+            <button type="button" class="@HitClass(ctx.Focal)"
+                    title="Click to copy this number"
+                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">
+                <span class="sw-cover"
+                      style="width:@(Math.Max(ctx.Seg.Text.Length - 4, 1))ch"></span>@ctx.Seg.Last4
             </button>
         }
     </text>;
@@ -122,18 +110,6 @@
                 <div class="sw-stat"><b>@counts.Low</b><span>low</span></div>
             </div>
 
-            @if (revealAll)
-            {
-                <div class="sw-notice">
-                    <span aria-hidden="true">&#9679;</span>
-                    <div>
-                        <b>Values are visible.</b> They are also in anything you copy
-                        or export while this is on, and the Windows clipboard keeps
-                        a history.
-                    </div>
-                </div>
-            }
-
             @if (sourceFormat is not null && sourceFormat != "text")
             {
                 <div class="sw-notice sw-notice-quiet">
@@ -171,11 +147,6 @@
                 </div>
 
                 <div class="sw-right">
-                    <label class="sw-switch">
-                        <input type="checkbox" checked="@revealAll" @onchange="ToggleRevealAll" />
-                        <span class="sw-track"></span>
-                        <span>Reveal numbers</span>
-                    </label>
                     <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
                             @onclick='() => ExportAsync("csv")'>CSV</button>
                     <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
@@ -187,13 +158,11 @@
 
             @foreach (Finding f in VisibleFindings())
             {
-                bool isOpen = revealAll || revealedIds.Contains(f.Id);
                 string band = f.Confidence.ToString().ToLowerInvariant();
 
                 <article class="sw-find sw-@band">
                     <div class="sw-find-head">
                         <span class="sw-badge sw-badge-@band">@band</span>
-                        <span class="sw-locus">@f.Location &middot; col @f.Column</span>
 
                         @if (f.IsItin)
                         {
@@ -207,13 +176,10 @@
                         {
                             <span class="sw-badge">&times;@f.Occurrences</span>
                         }
-
-                        <div class="sw-right">
-                            <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
-                                    @onclick="() => CopyAsync(f)">
-                                @(copiedId == f.Id ? "Copied" : "Copy")
-                            </button>
-                        </div>
+                        @if (copiedId == f.Id)
+                        {
+                            <span class="sw-badge sw-copied">Copied</span>
+                        }
                     </div>
 
                     <div class="sw-find-body">
@@ -225,14 +191,14 @@
 
                             @foreach (Seg2 s in f.Before)
                             {
-                                @Seg(new SegCtx(s, f.Id, isOpen, false))
+                                @Seg(new SegCtx(s, f.Id, false))
                             }
 
-                            @Seg(new SegCtx(Seg2.Ssn(f.Value, f.Last4), f.Id, isOpen, true))
+                            @Seg(new SegCtx(Seg2.Ssn(f.Value, f.Last4), f.Id, true))
 
                             @foreach (Seg2 s in f.After)
                             {
-                                @Seg(new SegCtx(s, f.Id, isOpen, false))
+                                @Seg(new SegCtx(s, f.Id, false))
                             }
 
                             @if (f.MoreAfter)
@@ -280,25 +246,16 @@
     /*
      * SSN SCANNER
      *
-     * Everything lives in this file: page state at the top, then the model
-     * types, the detection engine, and the file readers.
+     * Scans an uploaded .txt, .csv, .tsv, .xml, .xlsx or .pdf for Social
+     * Security Numbers and shows each one in context, scored high, medium or
+     * low, with the reasons for the score.
      *
-     * Two behaviours are deliberate and load-bearing:
+     * Values are redacted until revealed. Every SSN in an excerpt is covered,
+     * not only the focal one, so a card is safe to screenshot. Nothing is
+     * retained: findings are dropped on Wipe and Dispose.
      *
-     *   - Every SSN inside an excerpt is covered, not only the focal one.
-     *     Record exports put several SSNs a few words apart, so masking only
-     *     the focal value would leave the neighbours in plain view and a card
-     *     would be unsafe to screenshot.
-     *
-     *   - Nothing is retained. Findings are dropped on Wipe and on Dispose,
-     *     and the upload buffer is zeroed in a finally block. Because this is
-     *     Blazor Server the findings never reach the browser as data; only
-     *     rendered HTML crosses the wire.
-     *
-     * An SSN carries no checksum, so nothing here can prove a match is real.
-     * Every signal is circumstantial and the output is a ranking, not a
-     * verdict. Low confidence does not mean safe: a real SSN stored bare and
-     * unlabelled scores the same as a batch number.
+     * An SSN has no checksum, so the score is a ranking, not a verdict. Low
+     * does not mean safe -- a bare, unlabelled SSN scores like a batch number.
      */
 
     // ====================================================================
@@ -322,8 +279,6 @@
 
     private List<Finding> findings = new();
     private Counts? counts;
-    private readonly HashSet<int> revealedIds = new();
-    private bool revealAll;
     private string activeFilter = "all";
     private int copiedId = -1;
 
@@ -332,19 +287,13 @@
     private bool hasScanned;
 
     /// <summary>Context passed to the segment template.</summary>
-    private readonly record struct SegCtx(Seg2 Seg, int Id, bool Open, bool Focal);
+    private readonly record struct SegCtx(Seg2 Seg, int Id, bool Focal);
 
     /// <summary>
-    /// Class list for one redaction button. Built here rather than inline,
-    /// since nesting C# string literals inside a double-quoted Razor
-    /// attribute is a parsing hazard.
+    /// Class list for one covered value. Built here because nesting C# string
+    /// literals inside a double-quoted Razor attribute is a parsing hazard.
     /// </summary>
-    private static string HitClass(SegCtx ctx) =>
-        "sw-hit" + (ctx.Focal ? " sw-focal" : string.Empty)
-                 + (ctx.Open ? " sw-open" : string.Empty);
-
-    private static string HitTitle(SegCtx ctx) =>
-        ctx.Open ? "Hide this number" : "Show this number";
+    private static string HitClass(bool focal) => focal ? "sw-hit sw-focal" : "sw-hit";
 
     /// <summary>Findings matching the current band filter.</summary>
     private IEnumerable<Finding> VisibleFindings() =>
@@ -363,10 +312,7 @@
         errorMessage = null;
     }
 
-    /// <summary>
-    /// Reads the source, scans it, and drops the buffer. The upload is zeroed
-    /// in a finally block, so the wipe happens even when parsing throws.
-    /// </summary>
+    /// <summary>Reads the chosen file or pasted text, scans it, and zeroes the buffer.</summary>
     private async Task ScanAsync()
     {
         isBusy = true;
@@ -387,8 +333,7 @@
                 data = new byte[chosenFile.Size];
                 await using Stream stream = chosenFile.OpenReadStream(MaxUploadBytes);
 
-                // read in a loop: a browser stream returns short reads, and
-                // ReadExactlyAsync is .NET 7 and later only
+                    // browser streams return short reads
                 int filled = 0;
                 while (filled < data.Length)
                 {
@@ -421,10 +366,9 @@
             sourceDetail = source.Detail;
             extractionWarnings = source.Warnings;
 
-            revealedIds.Clear();
-            revealAll = false;
+            copiedId = -1;
             hasScanned = true;
-            pastedText = string.Empty;   // findings carry their own context now
+                pastedText = string.Empty;
 
             if (counts.Total == 0) { counts = null; }
         }
@@ -445,49 +389,34 @@
         }
     }
 
-    private void ToggleOne(int id)
-    {
-        copiedId = -1;
-        if (!revealedIds.Remove(id)) { revealedIds.Add(id); }
-    }
-
-    private void ToggleRevealAll(ChangeEventArgs e)
-    {
-        revealAll = e.Value is bool b && b;
-        revealedIds.Clear();
-        copiedId = -1;
-    }
-
-    /// <summary>Copies one finding as pasteable text, honouring its reveal state.</summary>
-    private async Task CopyAsync(Finding f)
+    /// <summary>
+    /// Copies one covered number. The value comes from the clicked segment,
+    /// so clicking a neighbour copies that neighbour rather than the card's
+    /// own match. The number is never shown on screen.
+    /// </summary>
+    private async Task CopyValueAsync(string value, int findingId)
     {
         if (jsModule is null) { return; }
 
         try
         {
-            bool reveal = revealAll || revealedIds.Contains(f.Id);
-            string value = reveal ? f.Value : f.Masked;
-            string text = $"{f.Location}, col {f.Column} [{f.Confidence}] {value}\n" +
-                          $"{Flatten(f.Before, !reveal)}  >>{value}<<  {Flatten(f.After, !reveal)}";
-
-            await jsModule.InvokeVoidAsync("copyText", text);
-            copiedId = f.Id;
+            await jsModule.InvokeVoidAsync("copyText", value);
+            copiedId = findingId;
         }
         catch (Exception)
         {
-            //Log.Error(ex, "Uh oh! SSNScanner.razor -> CopyAsync() has caught an exception!");
+            //Log.Error(ex, "Uh oh! SSNScanner.razor -> CopyValueAsync() has caught an exception!");
         }
     }
 
     /// <summary>
-    /// Builds an export in memory and hands it to the browser. Values follow
-    /// the reveal switch, so exports are redacted unless it is on.
+    /// Downloads the findings as CSV or JSON. Values are always redacted;
+    /// location is kept so a hit can be found again in the source file.
     /// </summary>
     private async Task ExportAsync(string kind)
     {
         if (jsModule is null) { return; }
 
-        bool reveal = revealAll;
         var sb = new StringBuilder();
 
         if (kind == "json")
@@ -496,18 +425,18 @@
             {
                 id = f.Id,
                 confidence = f.Confidence.ToString().ToLowerInvariant(),
-                value = reveal ? f.Value : f.Masked,
+                value = f.Masked,
                 location = f.Location,
                 line = f.Line,
                 column = f.Column,
                 neighbors = f.Neighbors,
                 reasons = string.Join("; ", f.Reasons),
-                before = Flatten(f.Before, !reveal),
-                after = Flatten(f.After, !reveal),
+                before = Flatten(f.Before),
+                after = Flatten(f.After),
             });
 
             sb.Append(System.Text.Json.JsonSerializer.Serialize(
-                new { source = sourceName, redacted = !reveal, findings = rows },
+                new { source = sourceName, redacted = true, findings = rows },
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
         else
@@ -521,14 +450,14 @@
                 {
                     f.Id.ToString(),
                     f.Confidence.ToString().ToLowerInvariant(),
-                    reveal ? f.Value : f.Masked,
+                    f.Masked,
                     f.Location,
                     f.Line.ToString(),
                     f.Column.ToString(),
                     f.Neighbors.ToString(),
                     string.Join("; ", f.Reasons),
-                    Flatten(f.Before, !reveal),
-                    Flatten(f.After, !reveal),
+                    Flatten(f.Before),
+                    Flatten(f.After),
                 };
 
                 sb.AppendLine(string.Join(',',
@@ -555,8 +484,6 @@
         findings = new List<Finding>();
         counts = null;
         extractionWarnings = Array.Empty<string>();
-        revealedIds.Clear();
-        revealAll = false;
         chosenFile = null;
         loadedLabel = null;
         pastedText = string.Empty;
@@ -631,11 +558,7 @@
         Ssn
     }
 
-    /// <summary>
-    /// One piece of an excerpt. Context is returned in segments rather than as
-    /// a flat string so every match inside a window can be redacted, not only
-    /// the focal one, and so label keywords can be highlighted in place.
-    /// </summary>
+    /// <summary>One piece of an excerpt: text, a keyword, or a match to redact.</summary>
     private readonly record struct Seg2(SegKind Kind, string Text, string Last4)
     {
         public static Seg2 Plain(string text) => new(SegKind.Text, text, string.Empty);
@@ -646,12 +569,12 @@
 
         public bool IsSsn => Kind == SegKind.Ssn;
 
-        public string Render(bool masked) => IsSsn && masked ? $"***-**-{Last4}" : Text;
+        public string Render() => IsSsn ? $"***-**-{Last4}" : Text;
     }
 
-    /// <summary>Joins segments into a string, redacting every SSN when masked.</summary>
-    private static string Flatten(IReadOnlyList<Seg2> segments, bool masked) =>
-        string.Concat(segments.Select(s => s.Render(masked))).Trim();
+    /// <summary>Joins segments into a string with every SSN redacted.</summary>
+    private static string Flatten(IReadOnlyList<Seg2> segments) =>
+        string.Concat(segments.Select(s => s.Render())).Trim();
 
     /// <summary>A candidate SSN with its score, reasons and surrounding context.</summary>
     private sealed class Finding
@@ -705,12 +628,7 @@
         IReadOnlyList<string> Locators,
         IReadOnlyList<string> Warnings)
     {
-        /// <summary>
-        /// True only for delimited formats, where line one is a header naming
-        /// the field. Without this gate the column signal fires on any format
-        /// whose first line happens to contain commas, inventing a "column"
-        /// reason for PDF and XML hits.
-        /// </summary>
+        /// <summary>True only for CSV and XLSX, where line one is a column header.</summary>
         public bool Tabular { get; init; }
 
         /// <summary>Maps a one-based line number to its human-readable position.</summary>
@@ -719,12 +637,7 @@
     }
 
     // ====================================================================
-    // detection
-    //
-    // Tuning surface: the weights and the two band thresholds below. Format
-    // signals reward explicit SSN punctuation, context signals reward or
-    // punish the words around the digits, and digit signals judge the number
-    // against SSA allocation rules.
+    // detection  -- weights and band thresholds below are the tuning surface
     // ====================================================================
 
     private const int DefaultContextChars = 30;
@@ -756,11 +669,8 @@
     private const string Dashes = "-\u2013\u2014";   // hyphen, en dash, em dash
 
     /// <summary>
-    /// Three digits, two digits, four digits, with an optional consistent
-    /// separator between each group. The dot guards are conditional: a dot
-    /// only disqualifies the match when it joins another digit, so IP
-    /// addresses and version strings are excluded while an SSN at the end of
-    /// a sentence is not.
+    /// 3-2-4 digits with an optional consistent separator. The dot guards are
+    /// conditional so IP addresses are excluded but a sentence-ending SSN is not.
     /// </summary>
     private static readonly Regex SsnPattern = new(
         @"(?<![0-9" + Dashes + @"])(?<![0-9]\.)" +
@@ -836,10 +746,7 @@
         area[0] == '9' && int.TryParse(group, out int g) &&
         ItinGroups.Any(r => g >= r.Lo && g <= r.Hi);
 
-    /// <summary>
-    /// Detects repdigits, straight runs and the well-known sample numbers.
-    /// Returns null when the digits look ordinary.
-    /// </summary>
+    /// <summary>Names the placeholder pattern, or null when the digits look real.</summary>
     private static string? LooksSynthetic(string digits)
     {
         if (digits.Distinct().Count() == 1) { return "all identical digits"; }
@@ -875,8 +782,7 @@
 
     /// <summary>
     /// How close a label sits: directly in front, loosely nearby, or absent.
-    /// Adjacency matters because dense reports put unrelated fields close
-    /// together, and the nearest label is the one describing the digits.
+    /// Adjacency wins, so the nearest label is the one describing the digits.
     /// </summary>
     private static (Proximity Where, string Text) Nearby(
         Regex pattern, string text, int start, int end, int window)
@@ -898,11 +804,7 @@
         return wide.Success ? (Proximity.Near, wide.Value) : (Proximity.None, string.Empty);
     }
 
-    /// <summary>
-    /// Names the delimited column a hit sits in, or null when the file is not
-    /// tabular. Bails out when the row and header disagree on field count,
-    /// which is the cheap way to avoid misreading quoted delimiters.
-    /// </summary>
+    /// <summary>Names the column a hit sits in, or null when the row does not fit the header.</summary>
     private static string? CsvColumn(string text, int start)
     {
         int firstEnd = text.IndexOf('\n');
@@ -951,7 +853,6 @@
             default: reasons.Add("bare 9-digit run"); break;
         }
 
-        // --- what the digits are -------------------------------------
         bool itin = IsItinNumber(mt.Area, mt.Group);
         var problems = StructuralProblems(mt.Area, mt.Group, mt.Serial);
 
@@ -988,9 +889,6 @@
             reasons.Add($"repeats {occurrences} times in this file");
         }
 
-        // --- what surrounds it ---------------------------------------
-        // Adjacency outranks proximity in both directions, so an "Invoice no"
-        // directly in front beats an "SSN" three lines away.
         var (pos, _) = Nearby(PositiveLabel, text, mt.Start, mt.End, LabelWindow);
         var (neg, negText) = Nearby(NegativeLabel, text, mt.Start, mt.End, NegativeWindow);
 
@@ -1053,10 +951,7 @@
         return (band, points, reasons, itin);
     }
 
-    /// <summary>
-    /// Every span matching the SSN shape, in document order. Rejects mixed
-    /// separators, so "123-45 6789" is treated as coincidence.
-    /// </summary>
+    /// <summary>Every span matching the SSN shape, in document order.</summary>
     private static List<RawMatch> RawMatches(string text)
     {
         var found = new List<RawMatch>();
@@ -1079,13 +974,8 @@
     }
 
     /// <summary>
-    /// Appends a run of ordinary text, splitting out any label keyword so the
-    /// UI can highlight it.
-    ///
-    /// This deliberately reuses PositiveLabel, the same pattern that awards
-    /// the label points, so a highlight always corresponds to a signal that
-    /// moved the score. Widening it here without widening the scorer would
-    /// produce highlights that explain nothing.
+    /// Appends text, splitting out label keywords so the UI can highlight them.
+    /// Reuses PositiveLabel so a highlight always marks a scored signal.
     /// </summary>
     private static void AddText(List<Seg2> segs, string chunk)
     {
@@ -1101,17 +991,12 @@
         if (cursor < chunk.Length) { segs.Add(Seg2.Plain(chunk[cursor..])); }
     }
 
-    /// <summary>
-    /// Slices a window into text, label and SSN segments. Every match falling
-    /// inside becomes its own segment so the UI can redact all of them.
-    /// </summary>
+    /// <summary>Slices a context window into text, keyword and SSN segments.</summary>
     private static List<Seg2> Segments(string text, int lo, int hi, List<RawMatch> matches)
     {
         var segs = new List<Seg2>();
         int cursor = lo;
 
-        // matches are in document order, so stop as soon as one starts past
-        // the window rather than scanning the whole list for every finding
         foreach (RawMatch m in matches)
         {
             if (m.Start >= hi) { break; }
@@ -1127,7 +1012,6 @@
 
         if (cursor < hi) { AddText(segs, Whitespace.Replace(text[cursor..hi], " ")); }
 
-        // trim only the outer edges, and only when they are ordinary text
         if (segs.Count > 0 && segs[0].Kind == SegKind.Text)
         {
             segs[0] = Seg2.Plain(segs[0].Text.TrimStart());
@@ -1141,10 +1025,7 @@
         return segs.Where(s => s.Kind != SegKind.Text || s.Text.Length > 0).ToList();
     }
 
-    /// <summary>
-    /// Widens a window so a character cut never slices a match in half.
-    /// Without this a half-included SSN would still surface its last four.
-    /// </summary>
+    /// <summary>Widens a window so a character cut never slices a match in half.</summary>
     private static (int Lo, int Hi) Snap(int lo, int hi, List<RawMatch> matches)
     {
         foreach (RawMatch m in matches)
@@ -1158,18 +1039,14 @@
         return (lo, hi);
     }
 
-    /// <summary>
-    /// Finds every candidate and returns it with surrounding character
-    /// context, tagged with the position the extractor reported.
-    /// </summary>
+    /// <summary>Finds every candidate SSN with its score, reasons and context.</summary>
     private static List<Finding> Scan(Extracted source, int contextChars)
     {
         string text = source.Text;
         var matches = RawMatches(text);
         if (matches.Count == 0) { return new List<Finding>(); }
 
-        // index the newlines once, so a line number is a binary search rather
-        // than a count from the start of the document for every finding
+        // indexed once so a line number is a binary search, not a re-count
         var newlines = new List<int>();
         for (int i = text.IndexOf('\n'); i >= 0; i = text.IndexOf('\n', i + 1))
         {
@@ -1191,8 +1068,6 @@
             List<Seg2> before = Segments(text, lo, mt.Start, matches);
             List<Seg2> after = Segments(text, mt.End, hi, matches);
 
-            // BinarySearch returns the complement of the insertion point when
-            // absent, which is exactly the count of newlines before this offset
             int found = newlines.BinarySearch(mt.Start);
             int priorLines = found >= 0 ? found : ~found;
             int lastNewline = priorLines > 0 ? newlines[priorLines - 1] : -1;
@@ -1232,14 +1107,10 @@
     };
 
     // ====================================================================
-    // file reading
-    //
-    // Rows are joined with tabs so the column-header signal above can still
-    // find field boundaries in tabular formats.
+    // file reading  -- rows are tab-joined so the column signal can find fields
     // ====================================================================
 
-    // Decompression bomb ceilings. A hostile file is small on disk and
-    // enormous once expanded, so every inflate path below is bounded.
+    // Decompression bomb ceilings; every inflate path below is bounded.
     private const long MaxExpanded = 200L * 1024 * 1024;
     private const long MaxOnePart = 60L * 1024 * 1024;
     private const int MaxZipRatio = 200;
@@ -1252,9 +1123,6 @@
     private static readonly string[] TextExts =
         { ".txt", ".log", ".md", ".json", ".htm", ".html" };
 
-    // \G anchors at the supplied offset, so these run against the whole
-    // stream without slicing it. Matching against content[i..] instead would
-    // copy everything left to scan on every character.
     private static readonly Regex PdfNumber = new(@"\G-?[\d.]+", RegexOptions.Compiled);
     private static readonly Regex PdfOperator = new(@"\G[A-Za-z'""*]+", RegexOptions.Compiled);
     private static readonly Regex PdfStreamStart = new("stream\r?\n", RegexOptions.Compiled);
@@ -1313,10 +1181,7 @@
         data.Length >= prefix.Length &&
         Encoding.ASCII.GetString(data, 0, prefix.Length) == prefix;
 
-    /// <summary>
-    /// Best-effort text decode. Tax exports are rarely clean UTF-8, so fall
-    /// back to Latin-1 rather than throwing.
-    /// </summary>
+    /// <summary>Decodes as UTF-8, falling back to Latin-1 rather than throwing.</summary>
     private static string Decode(byte[] data)
     {
         try
@@ -1332,11 +1197,7 @@
 
     // ---- csv -----------------------------------------------------------
 
-    /// <summary>
-    /// Parses delimited text, sniffing the delimiter unless the name says
-    /// .tsv. Fields are re-joined with tabs so a quoted comma cannot fake a
-    /// column boundary downstream.
-    /// </summary>
+    /// <summary>Parses delimited text, sniffing the delimiter unless the name says .tsv.</summary>
     private static Extracted ReadCsv(byte[] data, string filename)
     {
         string text = Decode(data);
@@ -1371,10 +1232,7 @@
         { Tabular = true };
     }
 
-    /// <summary>
-    /// Minimal RFC 4180 reader: quoted fields, doubled quotes, and newlines
-    /// inside quotes. Written out rather than pulled from a package.
-    /// </summary>
+    /// <summary>Minimal RFC 4180 reader: quoted fields, doubled quotes, embedded newlines.</summary>
     private static IEnumerable<List<string>> ParseDelimited(string text, char delim)
     {
         var row = new List<string>();
@@ -1434,9 +1292,8 @@
     // ---- xlsx ----------------------------------------------------------
 
     /// <summary>
-    /// Extracts every sheet as tab-joined rows. Guarded against zip bombs by
-    /// entry size, compression ratio and total expansion, and against XML
-    /// entity expansion by SafeXml.
+    /// Extracts every worksheet as tab-joined rows. Guarded against zip bombs
+    /// and XML entity expansion.
     /// </summary>
     private static Extracted ReadXlsx(byte[] data)
     {
@@ -1554,11 +1411,7 @@
         return buffer.ToArray();
     }
 
-    /// <summary>
-    /// Parses XML only after refusing anything that can self-expand or reach
-    /// outside the document. Neither DTDs nor entities have any legitimate
-    /// use in an xlsx part, so both are rejected outright.
-    /// </summary>
+    /// <summary>Parses a workbook part, refusing DTDs and entities outright.</summary>
     private static XElement SafeXml(byte[] raw, string what)
     {
         string head = Encoding.Latin1.GetString(raw, 0, Math.Min(raw.Length, 65536));
@@ -1674,18 +1527,10 @@
     // ---- xml -----------------------------------------------------------
 
     /// <summary>
-    /// Reads an XML document as one line per text node, attribute and comment,
-    /// with the element path as the locator so a finding reports something
-    /// like "Members/Member/SSN" rather than a line number.
-    ///
-    /// Each line is written as "name: value". That is not cosmetic: it puts
-    /// the element or attribute name directly in front of the digits, so
-    /// &lt;SSN&gt;412-70-1901&lt;/SSN&gt; earns the label-adjacency points it
-    /// should, and the name is highlighted in the excerpt.
-    ///
-    /// Hardened the same way as the spreadsheet parts. A user-supplied XML
-    /// file is an XXE and entity-expansion vector, so DTDs and entities are
-    /// refused outright rather than merely disabled.
+    /// Reads XML as one "name: value" line per text node, attribute and
+    /// comment, with the element path as the locator. The name prefix puts the
+    /// element directly in front of the digits, so &lt;SSN&gt; scores as a label.
+    /// DTDs and entities are refused: user XML is an XXE vector.
     /// </summary>
     private static Extracted ReadXml(byte[] data)
     {
@@ -1756,7 +1601,6 @@
                         break;
 
                     case XmlNodeType.Comment:
-                        // comments are a favourite place for pasted sample data
                         if (reader.Value.Trim().Length == 0) { break; }
                         lines.Add($"comment: {reader.Value.Trim()}");
                         locators.Add($"{CurrentPath()} (comment)");
@@ -1766,9 +1610,7 @@
         }
         catch (XmlException exc)
         {
-            // A malformed export is common and still worth scanning, so fall
-            // back to flat text rather than refusing. Say so, loudly, because
-            // the element-path locators are lost when this happens.
+            // malformed exports are common; scan them as text and say so
             Extracted plain = ReadPlainText(data);
             return plain with
             {
@@ -1794,13 +1636,8 @@
     // ---- pdf -----------------------------------------------------------
 
     /// <summary>
-    /// Extracts text from a PDF by inflating its content streams.
-    ///
-    /// Best effort by necessity: the shared framework has no PDF reader.
-    /// Encrypted files, scanned pages with no text layer, and unknown
-    /// compression filters are detected and reported rather than returning a
-    /// misleading empty result. A clean zero from this reader is not evidence
-    /// that a PDF is clean.
+    /// Extracts text from a PDF by inflating its content streams. Best effort:
+    /// no OCR, no encrypted files. A clean zero is not proof a PDF is clean.
     /// </summary>
     private static Extracted ReadPdf(byte[] data)
     {
@@ -1823,8 +1660,6 @@
             int end = latin.IndexOf("endstream", start, StringComparison.Ordinal);
             if (end < 0) { continue; }
 
-            // Latin-1 is one byte per char, so these offsets index the
-            // original array directly; no need to convert back from the string
             int stop = end;
             while (stop > start &&
                    (data[stop - 1] == (byte)'\r' || data[stop - 1] == (byte)'\n'))
@@ -1885,17 +1720,14 @@
             $"{pages.Count} page block(s)", locators, warnings);
     }
 
-    /// <summary>
-    /// Bounded inflate. Returns null when the stream is not deflate
-    /// compressed, and refuses anything expanding past the per-part ceiling.
-    /// </summary>
+    /// <summary>Bounded inflate. Null when not deflate, or past the size ceiling.</summary>
     private static byte[]? TryInflate(byte[] blob)
     {
         try
         {
             using var input = new MemoryStream(blob);
 
-            // skip the two-byte zlib header that DeflateStream does not expect
+            // skip the zlib header DeflateStream does not expect
             if (blob.Length > 2 && blob[0] == 0x78) { input.Seek(2, SeekOrigin.Begin); }
 
             using var deflate = new DeflateStream(input, CompressionMode.Decompress);
@@ -1920,11 +1752,7 @@
         }
     }
 
-    /// <summary>
-    /// Walks a content stream, returning text with rough line breaks. Handles
-    /// literal and hex strings, and reads a large negative kern inside a TJ
-    /// array as a word space.
-    /// </summary>
+    /// <summary>Walks a content stream into text, reading a large negative kern as a space.</summary>
     private static string ExtractPdfStrings(string content)
     {
         var output = new StringBuilder();

@@ -403,14 +403,13 @@
     cursor: pointer;
 }
 
-.ssn-sweep .sw-segmented button.sw-on,
 .ssn-sweep .sw-segmented button[aria-pressed="true"] {
     background: var(--sw-text);
     color: var(--sw-surface);
     font-weight: 650;
 }
 
-.ssn-sweep .sw-segmented button:not(.sw-on):hover {
+.ssn-sweep .sw-segmented button:not([aria-pressed="true"]):hover {
     background: var(--sw-surface);
     color: var(--sw-text);
 }
@@ -420,6 +419,63 @@
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+/* Reveal toggle. */
+
+.ssn-sweep .sw-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 13.5px;
+    color: var(--sw-text-2);
+    cursor: pointer;
+    user-select: none;
+    margin: 0;
+}
+
+.ssn-sweep .sw-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.ssn-sweep .sw-track {
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--sw-slate-soft);
+    border: 1px solid var(--sw-line);
+    position: relative;
+    transition: background .16s ease, border-color .16s ease;
+}
+
+.ssn-sweep .sw-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--sw-surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .3);
+    transition: transform .16s ease;
+}
+
+.ssn-sweep .sw-switch input:checked + .sw-track {
+    background: var(--sw-red);
+    border-color: var(--sw-red);
+}
+
+.ssn-sweep .sw-switch input:checked + .sw-track::after {
+    transform: translateX(16px);
+}
+
+.ssn-sweep .sw-switch input:focus-visible + .sw-track {
+    outline: 2px solid var(--sw-red);
+    outline-offset: 2px;
 }
 
 /* One finding: header badges, excerpt, score reasons. */

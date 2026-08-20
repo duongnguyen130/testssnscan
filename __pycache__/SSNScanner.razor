@@ -40,7 +40,7 @@
         {
             <button type="button" class="@HitClass(ctx.Focal)"
                     title="Click to copy this number"
-                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">@ctx.Seg.Text</button>
+                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">@ctx.Seg.Render(!revealAll)</button>
         }
     </text>;
 }
@@ -142,13 +142,18 @@
                     @foreach (string f in Filters)
                     {
                         string bandName = f;
-                        <button type="button" class="@FilterClass(bandName)"
+                        <button type="button"
                                 aria-pressed="@Pressed(activeFilter == bandName)"
                                 @onclick="() => activeFilter = bandName">@bandName</button>
                     }
                 </div>
 
                 <div class="sw-right">
+                    <label class="sw-switch">
+                        <input type="checkbox" checked="@revealAll" @onchange="ToggleReveal" />
+                        <span class="sw-track"></span>
+                        <span>Reveal numbers</span>
+                    </label>
                     <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
                             @onclick='() => ExportAsync("csv")'>CSV</button>
                     <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
@@ -282,6 +287,13 @@
     private List<Finding> findings = new();
     private Counts? counts;
     private string activeFilter = "all";
+
+    /// <summary>
+    /// Whether values are shown in full. On by default; switching it off
+    /// redacts every value on screen and in any export taken afterwards.
+    /// Clicking a value still copies the real number either way.
+    /// </summary>
+    private bool revealAll = true;
     private int copiedId = -1;
 
     private string? errorMessage;
@@ -292,19 +304,16 @@
     private readonly record struct SegCtx(Seg2 Seg, int Id, bool Focal);
 
     /// <summary>
-    /// Class list for one covered value. Built here because nesting C# string
-    /// literals inside a double-quoted Razor attribute is a parsing hazard.
+    /// Class list for one detected value. Built here because nested string
+    /// literals in a double-quoted Razor attribute are a parsing hazard.
     /// </summary>
     private static string HitClass(bool focal) => focal ? "sw-hit sw-focal" : "sw-hit";
 
     /// <summary>
-    /// aria-pressed as a literal string. A C# bool would be rendered as a
-    /// boolean attribute instead, which never matches [aria-pressed="true"].
+    /// aria-pressed as a literal string. A C# bool renders as a boolean
+    /// attribute, which never matches [aria-pressed="true"].
     /// </summary>
     private static string Pressed(bool on) => on ? "true" : "false";
-
-    /// <summary>Marks the selected band filter.</summary>
-    private string FilterClass(string band) => activeFilter == band ? "sw-on" : string.Empty;
 
     /// <summary>Findings matching the current band filter.</summary>
     private IEnumerable<Finding> VisibleFindings() =>
@@ -400,10 +409,17 @@
         }
     }
 
+    /// <summary>Shows or hides every value on screen.</summary>
+    private void ToggleReveal(ChangeEventArgs e)
+    {
+        revealAll = e.Value is bool on && on;
+        copiedId = -1;
+    }
+
     /// <summary>
-    /// Copies one covered number. The value comes from the clicked segment,
-    /// so clicking a neighbour copies that neighbour rather than the card's
-    /// own match. The number is never shown on screen.
+    /// Copies the clicked value. It comes from the segment, so clicking a
+    /// neighbour copies that neighbour, not the card's own match. The real
+    /// number is copied even while values are hidden.
     /// </summary>
     private async Task CopyValueAsync(string value, int findingId)
     {
@@ -421,13 +437,14 @@
     }
 
     /// <summary>
-    /// Downloads the findings as CSV or JSON. Values are always redacted;
-    /// location is kept so a hit can be found again in the source file.
+    /// Downloads the findings as CSV or JSON. Values follow the reveal
+    /// toggle, so an export taken while values are hidden stays redacted.
     /// </summary>
     private async Task ExportAsync(string kind)
     {
         if (jsModule is null) { return; }
 
+        bool masked = !revealAll;
         var sb = new StringBuilder();
 
         if (kind == "json")
@@ -436,18 +453,18 @@
             {
                 id = f.Id,
                 confidence = f.Confidence.ToString().ToLowerInvariant(),
-                value = f.Masked,
+                value = revealAll ? f.Value : f.Masked,
                 location = f.Location,
                 line = f.Line,
                 column = f.Column,
                 neighbors = f.Neighbors,
                 reasons = string.Join("; ", f.Reasons),
-                before = Flatten(f.Before),
-                after = Flatten(f.After),
+                before = Flatten(f.Before, masked),
+                after = Flatten(f.After, masked),
             });
 
             sb.Append(System.Text.Json.JsonSerializer.Serialize(
-                new { source = sourceName, redacted = true, findings = rows },
+                new { source = sourceName, redacted = masked, findings = rows },
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
         else
@@ -461,14 +478,14 @@
                 {
                     f.Id.ToString(),
                     f.Confidence.ToString().ToLowerInvariant(),
-                    f.Masked,
+                    revealAll ? f.Value : f.Masked,
                     f.Location,
                     f.Line.ToString(),
                     f.Column.ToString(),
                     f.Neighbors.ToString(),
                     string.Join("; ", f.Reasons),
-                    Flatten(f.Before),
-                    Flatten(f.After),
+                    Flatten(f.Before, masked),
+                    Flatten(f.After, masked),
                 };
 
                 sb.AppendLine(string.Join(',',
@@ -580,12 +597,14 @@
 
         public bool IsSsn => Kind == SegKind.Ssn;
 
-        public string Render() => IsSsn ? $"***-**-{Last4}" : Text;
+        /// <summary>The value, or its redacted form when masked is set.</summary>
+        public string Render(bool masked) =>
+            IsSsn && masked ? $"***-**-{Last4}" : Text;
     }
 
-    /// <summary>Joins segments into a string with every SSN redacted.</summary>
-    private static string Flatten(IReadOnlyList<Seg2> segments) =>
-        string.Concat(segments.Select(s => s.Render())).Trim();
+    /// <summary>Joins segments into a string, redacting values when masked.</summary>
+    private static string Flatten(IReadOnlyList<Seg2> segments, bool masked) =>
+        string.Concat(segments.Select(s => s.Render(masked))).Trim();
 
     /// <summary>A candidate SSN with its score, reasons and surrounding context.</summary>
     private sealed class Finding
@@ -681,7 +700,7 @@
 
     /// <summary>
     /// 3-2-4 digits with an optional consistent separator. The dot guards are
-    /// conditional so IP addresses are excluded but a sentence-ending SSN is not.
+    /// conditional: they exclude IPs but not a sentence-ending SSN.
     /// </summary>
     private static readonly Regex SsnPattern = new(
         @"(?<![0-9" + Dashes + @"])(?<![0-9]\.)" +
@@ -791,10 +810,7 @@
         return SepKind.Dash;
     }
 
-    /// <summary>
-    /// How close a label sits: directly in front, loosely nearby, or absent.
-    /// Adjacency wins, so the nearest label is the one describing the digits.
-    /// </summary>
+    /// <summary>How close a label sits. Adjacency wins over mere proximity.</summary>
     private static (Proximity Where, string Text) Nearby(
         Regex pattern, string text, int start, int end, int window)
     {
@@ -985,8 +1001,8 @@
     }
 
     /// <summary>
-    /// Appends text, splitting out label keywords so the UI can highlight them.
-    /// Reuses PositiveLabel so a highlight always marks a scored signal.
+    /// Appends text, splitting out label keywords for highlighting. Reuses
+    /// PositiveLabel so a highlight always marks a scored signal.
     /// </summary>
     private static void AddText(List<Seg2> segs, string chunk)
     {
@@ -1161,9 +1177,7 @@
             return ReadXml(data);
         }
 
-        // A zip that is not a workbook is refused rather than scanned. Its
-        // contents are compressed, so a text pass would find nothing and
-        // report a clean result for a file that was never really read.
+        // refused, not scanned: compressed content would give a false all-clear
         if (Starts(data, "PK"))
         {
             throw new ScanFileException(
@@ -1181,10 +1195,8 @@
     }
 
     /// <summary>
-    /// Pulls readable text runs out of a file in an unrecognised format, the
-    /// way the strings utility does, so an SSN sitting in a binary export is
-    /// still found without filling excerpts with control characters. Reads
-    /// both single-byte and UTF-16LE runs.
+    /// Pulls readable text runs out of an unrecognised format, the way the
+    /// strings utility does. Reads single-byte and UTF-16LE runs.
     /// </summary>
     private static Extracted ReadStrings(byte[] data)
     {
@@ -1223,9 +1235,7 @@
 
         Flush(ascii, Math.Max(0, data.Length - ascii.Length));
 
-        // UTF-16LE: printable byte, zero byte, repeating. Both parities are
-        // scanned because such text is not guaranteed to start on an even
-        // offset, and an odd-aligned run would otherwise be invisible.
+        // UTF-16LE. Both parities, since such text need not start on an even offset.
         var wide = new StringBuilder();
         int wideStart = 0;
 
@@ -1387,10 +1397,7 @@
 
     // ---- xlsx ----------------------------------------------------------
 
-    /// <summary>
-    /// Extracts every worksheet as tab-joined rows. Guarded against zip bombs
-    /// and XML entity expansion.
-    /// </summary>
+    /// <summary>Extracts every worksheet as tab-joined rows.</summary>
     private static Extracted ReadXlsx(byte[] data)
     {
         ZipArchive zip;
@@ -1624,9 +1631,8 @@
 
     /// <summary>
     /// Reads XML as one "name: value" line per text node, attribute and
-    /// comment, with the element path as the locator. The name prefix puts the
-    /// element directly in front of the digits, so &lt;SSN&gt; scores as a label.
-    /// DTDs and entities are refused: user XML is an XXE vector.
+    /// comment, keyed by element path. The name prefix lets &lt;SSN&gt; score
+    /// as a label. DTDs and entities are refused as an XXE vector.
     /// </summary>
     private static Extracted ReadXml(byte[] data)
     {
@@ -1732,8 +1738,8 @@
     // ---- pdf -----------------------------------------------------------
 
     /// <summary>
-    /// Extracts text from a PDF by inflating its content streams. Best effort:
-    /// no OCR, no encrypted files. A clean zero is not proof a PDF is clean.
+    /// Extracts PDF text by inflating its content streams. Best effort: no
+    /// OCR. A clean zero is not proof a PDF is clean.
     /// </summary>
     private static Extracted ReadPdf(byte[] data)
     {

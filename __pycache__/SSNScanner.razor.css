@@ -1,0 +1,655 @@
+/* ==========================================================================
+   SSN Scanner — collocated scoped stylesheet.
+
+   Blazor rewrites every selector here with this page's scope attribute, so
+   nothing can reach outside the component and the site stylesheet cannot
+   reach in.
+
+   Two belts on top of that brace, so this file also behaves if it is ever
+   moved to wwwroot and linked as a plain stylesheet:
+
+     1. Every class is prefixed sw-. Blazor templates ship Bootstrap, which
+        already defines card, btn, badge, switch and toolbar.
+     2. Every rule is nested under .ssn-sweep.
+
+   Custom properties sit on .ssn-sweep rather than :root, because scoping
+   would rewrite :root to :root[b-xxxxx] and match nothing. Override them
+   from your own stylesheet to make this inherit the site palette.
+
+   Red is reserved and never decorative: it appears only on redacted values
+   and high-confidence signals, so a red block always means exposed PII.
+
+   Sections: tokens, cards, intake, controls, results header, finding cards,
+   redaction, states, responsive.
+   ========================================================================== */
+
+/* ---- tokens ---- */
+
+.ssn-sweep {
+    --sw-surface: #FFFFFF;
+    --sw-surface-2: #F8FAFB;
+    --sw-line: #E3E7EC;
+    --sw-line-soft: #EDF0F3;
+    --sw-text: #0F172A;
+    --sw-text-2: #5B6675;
+    --sw-text-3: #8A94A3;
+
+    --sw-red: #C7261B;
+    --sw-red-deep: #8E1810;
+    --sw-red-soft: #FDECEA;
+    --sw-amber: #B45309;
+    --sw-amber-soft: #FDF3E4;
+    --sw-slate-soft: #EEF1F5;
+
+    --sw-radius: 14px;
+    --sw-radius-sm: 9px;
+    --sw-shadow: 0 1px 2px rgba(15, 23, 42, .05),
+                 0 8px 24px -16px rgba(15, 23, 42, .28);
+
+    --sw-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+               "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+    --sw-mono: ui-monospace, "Cascadia Code", "Cascadia Mono", "SF Mono",
+               Consolas, "DejaVu Sans Mono", monospace;
+
+    font-family: var(--sw-sans);
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--sw-text);
+    -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+    .ssn-sweep {
+        --sw-surface: #161B21;
+        --sw-surface-2: #1B2128;
+        --sw-line: #262E37;
+        --sw-line-soft: #1F262E;
+        --sw-text: #E8ECF1;
+        --sw-text-2: #A0AAB8;
+        --sw-text-3: #6F7B8A;
+
+        --sw-red: #E04A3C;
+        --sw-red-deep: #B02B1E;
+        --sw-red-soft: #2A1614;
+        --sw-amber: #E0A244;
+        --sw-amber-soft: #241C10;
+        --sw-slate-soft: #212932;
+        --sw-shadow: 0 1px 2px rgba(0, 0, 0, .4);
+    }
+}
+
+.ssn-sweep *,
+.ssn-sweep *::before,
+.ssn-sweep *::after {
+    box-sizing: border-box;
+}
+
+/* ---- cards ---- */
+
+.ssn-sweep .sw-card {
+    background: var(--sw-surface);
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius);
+    box-shadow: var(--sw-shadow);
+}
+
+.ssn-sweep .sw-intake {
+    padding: 26px;
+}
+
+.ssn-sweep .sw-card-head h2 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 650;
+    letter-spacing: -.02em;
+    color: var(--sw-text);
+}
+
+.ssn-sweep .sw-sub {
+    margin: 6px 0 20px;
+    color: var(--sw-text-2);
+    font-size: 14px;
+    max-width: 62ch;
+}
+
+/* ---- intake ---- */
+
+.ssn-sweep .sw-dropzone {
+    border: 1.5px dashed var(--sw-line);
+    border-radius: var(--sw-radius-sm);
+    background: var(--sw-surface-2);
+    padding: 30px 20px;
+    text-align: center;
+}
+
+.ssn-sweep .sw-dropzone-icon {
+    width: 34px;
+    height: 34px;
+    margin: 0 auto 12px;
+    border-radius: 8px;
+    border: 1.5px solid var(--sw-text-3);
+    position: relative;
+}
+
+.ssn-sweep .sw-dropzone-icon::before,
+.ssn-sweep .sw-dropzone-icon::after {
+    content: "";
+    position: absolute;
+    background: var(--sw-text-3);
+    border-radius: 2px;
+}
+
+.ssn-sweep .sw-dropzone-icon::before {
+    left: 7px;
+    right: 7px;
+    top: 10px;
+    height: 1.5px;
+}
+
+.ssn-sweep .sw-dropzone-icon::after {
+    left: 7px;
+    right: 13px;
+    top: 17px;
+    height: 1.5px;
+}
+
+.ssn-sweep .sw-dropzone-title {
+    margin: 0;
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.ssn-sweep .sw-dropzone-sub {
+    margin: 4px 0 0;
+    color: var(--sw-text-2);
+    font-size: 13.5px;
+}
+
+/* InputFile is a child component, so the scope attribute is never stamped on
+   the <input> it renders. ::deep is required to reach it. If this file is
+   moved to wwwroot as a plain stylesheet, delete the ::deep tokens instead. */
+.ssn-sweep .sw-dropzone ::deep input[type="file"] {
+    display: block;
+    margin: 14px auto 0;
+    font: inherit;
+    font-size: 13px;
+    color: var(--sw-text-2);
+    max-width: 320px;
+}
+
+.ssn-sweep .sw-dropzone ::deep input[type="file"]::file-selector-button {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 550;
+    padding: 7px 14px;
+    margin-right: 10px;
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius-sm);
+    background: var(--sw-surface);
+    color: var(--sw-text);
+    cursor: pointer;
+}
+
+.ssn-sweep .sw-dropzone ::deep input[type="file"]::file-selector-button:hover {
+    background: var(--sw-surface-2);
+}
+
+.ssn-sweep .sw-paste {
+    margin-top: 16px;
+}
+
+.ssn-sweep .sw-paste summary {
+    cursor: pointer;
+    font-size: 13.5px;
+    color: var(--sw-text-2);
+    padding: 6px 0;
+    width: max-content;
+}
+
+.ssn-sweep textarea {
+    width: 100%;
+    margin-top: 8px;
+    resize: vertical;
+    font-family: var(--sw-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--sw-text);
+    background: var(--sw-surface-2);
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius-sm);
+    padding: 12px 14px;
+}
+
+/* ---- controls ---- */
+
+.ssn-sweep .sw-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--sw-line-soft);
+}
+
+.ssn-sweep .sw-stepper {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+    color: var(--sw-text-2);
+    margin: 0;
+}
+
+.ssn-sweep .sw-stepper input {
+    width: 66px;
+    padding: 7px 10px;
+    font-family: var(--sw-mono);
+    font-size: 13.5px;
+    color: var(--sw-text);
+    background: var(--sw-surface);
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius-sm);
+}
+
+.ssn-sweep .sw-unit {
+    color: var(--sw-text-3);
+}
+
+.ssn-sweep .sw-loaded {
+    font-size: 13px;
+    color: var(--sw-text-2);
+    font-family: var(--sw-mono);
+}
+
+.ssn-sweep .sw-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+}
+
+.ssn-sweep .sw-btn {
+    font: inherit;
+    font-size: 14px;
+    font-weight: 550;
+    padding: 9px 18px;
+    border-radius: var(--sw-radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+
+.ssn-sweep .sw-btn-primary {
+    background: var(--sw-text);
+    color: var(--sw-surface);
+}
+
+.ssn-sweep .sw-btn-primary:hover {
+    background: var(--sw-red-deep);
+}
+
+.ssn-sweep .sw-btn-ghost {
+    background: transparent;
+    border-color: var(--sw-line);
+    color: var(--sw-text);
+}
+
+.ssn-sweep .sw-btn-ghost:hover {
+    background: var(--sw-surface-2);
+}
+
+.ssn-sweep .sw-btn:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.ssn-sweep .sw-btn-sm {
+    font-size: 13px;
+    padding: 6px 12px;
+}
+
+.ssn-sweep button:focus-visible,
+.ssn-sweep input:focus-visible,
+.ssn-sweep textarea:focus-visible,
+.ssn-sweep summary:focus-visible {
+    outline: 2px solid var(--sw-red);
+    outline-offset: 2px;
+    border-radius: var(--sw-radius-sm);
+}
+
+/* ---- results header ---- */
+
+.ssn-sweep .sw-results {
+    margin-top: 28px;
+}
+
+.ssn-sweep .sw-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.ssn-sweep .sw-stat {
+    background: var(--sw-surface);
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius-sm);
+    padding: 14px 16px;
+}
+
+.ssn-sweep .sw-stat b {
+    display: block;
+    font-size: 26px;
+    font-weight: 650;
+    letter-spacing: -.03em;
+    font-variant-numeric: tabular-nums;
+}
+
+.ssn-sweep .sw-stat span {
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--sw-text-3);
+    font-weight: 600;
+}
+
+.ssn-sweep .sw-stat.sw-is-high b {
+    color: var(--sw-red);
+}
+
+.ssn-sweep .sw-stat.sw-is-medium b {
+    color: var(--sw-amber);
+}
+
+.ssn-sweep .sw-notice {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    background: var(--sw-red-soft);
+    border: 1px solid var(--sw-red);
+    border-radius: var(--sw-radius-sm);
+    padding: 12px 14px;
+    font-size: 13.5px;
+    color: var(--sw-text);
+    margin-bottom: 10px;
+}
+
+.ssn-sweep .sw-notice b {
+    font-weight: 650;
+}
+
+.ssn-sweep .sw-notice-quiet {
+    background: var(--sw-surface-2);
+    border-color: var(--sw-line);
+}
+
+.ssn-sweep .sw-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 0 14px;
+}
+
+.ssn-sweep .sw-segmented {
+    display: inline-flex;
+    background: var(--sw-slate-soft);
+    border-radius: var(--sw-radius-sm);
+    padding: 3px;
+    gap: 2px;
+}
+
+.ssn-sweep .sw-segmented button {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 550;
+    text-transform: capitalize;
+    color: var(--sw-text-2);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    padding: 5px 13px;
+    cursor: pointer;
+}
+
+.ssn-sweep .sw-segmented button[aria-pressed="true"] {
+    background: var(--sw-surface);
+    color: var(--sw-text);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
+}
+
+.ssn-sweep .sw-right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* ---- reveal switch ---- */
+
+.ssn-sweep .sw-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 13.5px;
+    color: var(--sw-text-2);
+    cursor: pointer;
+    user-select: none;
+    margin: 0;
+}
+
+.ssn-sweep .sw-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.ssn-sweep .sw-track {
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--sw-slate-soft);
+    border: 1px solid var(--sw-line);
+    position: relative;
+    transition: background .16s ease, border-color .16s ease;
+}
+
+.ssn-sweep .sw-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--sw-surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .3);
+    transition: transform .16s ease;
+}
+
+.ssn-sweep .sw-switch input:checked + .sw-track {
+    background: var(--sw-red);
+    border-color: var(--sw-red);
+}
+
+.ssn-sweep .sw-switch input:checked + .sw-track::after {
+    transform: translateX(16px);
+}
+
+.ssn-sweep .sw-switch input:focus-visible + .sw-track {
+    outline: 2px solid var(--sw-red);
+    outline-offset: 2px;
+}
+
+/* ---- finding cards ---- */
+
+.ssn-sweep .sw-find {
+    background: var(--sw-surface);
+    border: 1px solid var(--sw-line);
+    border-radius: var(--sw-radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+.ssn-sweep .sw-find.sw-high {
+    border-color: var(--sw-red);
+}
+
+.ssn-sweep .sw-find-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--sw-line-soft);
+    background: var(--sw-surface-2);
+}
+
+.ssn-sweep .sw-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--sw-slate-soft);
+    color: var(--sw-text-2);
+}
+
+.ssn-sweep .sw-badge-high {
+    background: var(--sw-red-soft);
+    color: var(--sw-red);
+}
+
+.ssn-sweep .sw-badge-medium {
+    background: var(--sw-amber-soft);
+    color: var(--sw-amber);
+}
+
+.ssn-sweep .sw-locus {
+    font-family: var(--sw-mono);
+    font-size: 12px;
+    color: var(--sw-text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.ssn-sweep .sw-find-body {
+    padding: 16px;
+}
+
+.ssn-sweep .sw-excerpt {
+    font-family: var(--sw-mono);
+    font-size: 13px;
+    line-height: 2;
+    word-break: break-word;
+    color: var(--sw-text-2);
+}
+
+.ssn-sweep .sw-ell {
+    color: var(--sw-text-3);
+}
+
+.ssn-sweep .sw-reasons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 14px;
+}
+
+.ssn-sweep .sw-reason {
+    font-size: 11.5px;
+    color: var(--sw-text-2);
+    background: var(--sw-surface-2);
+    border: 1px solid var(--sw-line-soft);
+    border-radius: 999px;
+    padding: 3px 10px;
+}
+
+/* ---- redaction: solid block over the hidden digits, click to peel ---- */
+
+.ssn-sweep .sw-hit {
+    font: inherit;
+    font-family: var(--sw-mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFF;
+    background: var(--sw-red);
+    border: 0;
+    border-radius: 4px;
+    padding: 2px 5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .14s ease, box-shadow .14s ease;
+}
+
+.ssn-sweep .sw-hit:hover,
+.ssn-sweep .sw-hit.sw-open {
+    background: var(--sw-red-deep);
+}
+
+.ssn-sweep .sw-hit.sw-focal {
+    box-shadow: 0 0 0 2px var(--sw-surface), 0 0 0 4px var(--sw-red);
+}
+
+.ssn-sweep .sw-cover {
+    display: inline-block;
+    vertical-align: -1px;
+    height: 1em;
+    background: rgba(0, 0, 0, .45);
+    border-radius: 2px;
+    margin-right: 2px;
+}
+
+/* ---- states ---- */
+
+.ssn-sweep .sw-empty,
+.ssn-sweep .sw-err {
+    border-radius: var(--sw-radius);
+    padding: 40px 24px;
+    text-align: center;
+    border: 1px solid var(--sw-line);
+    background: var(--sw-surface);
+    margin-top: 20px;
+}
+
+.ssn-sweep .sw-empty strong {
+    display: block;
+    font-size: 17px;
+    font-weight: 650;
+    margin-bottom: 4px;
+}
+
+.ssn-sweep .sw-empty span {
+    color: var(--sw-text-2);
+    font-size: 14px;
+}
+
+.ssn-sweep .sw-err {
+    text-align: left;
+    padding: 14px 16px;
+    border-color: var(--sw-red);
+    background: var(--sw-red-soft);
+    font-size: 14px;
+}
+
+/* ---- responsive ---- */
+
+@media (max-width: 720px) {
+    .ssn-sweep .sw-intake {
+        padding: 20px;
+    }
+
+    .ssn-sweep .sw-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .ssn-sweep .sw-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .ssn-sweep .sw-actions .sw-btn {
+        flex: 1;
+    }
+}

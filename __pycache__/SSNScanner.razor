@@ -388,13 +388,25 @@
 
             copiedId = -1;
             hasScanned = true;
-                pastedText = string.Empty;
+            pastedText = string.Empty;
+
+            if (findings.Count == MaxFindings)
+            {
+                extractionWarnings = extractionWarnings
+                    .Append($"Stopped after {MaxFindings} findings. This file has " +
+                            "more; narrow it down and scan again.")
+                    .ToList();
+            }
 
             if (counts.Total == 0) { counts = null; }
         }
         catch (ScanFileException ex)
         {
             errorMessage = ex.Message;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            errorMessage = "Scanning this file timed out. Split it and scan the pieces.";
         }
         catch (Exception)
         {
@@ -488,8 +500,7 @@
                     Flatten(f.After, masked),
                 };
 
-                sb.AppendLine(string.Join(',',
-                    cells.Select(c => "\"" + c.Replace("\"", "\"\"") + "\"")));
+                sb.AppendLine(string.Join(',', cells.Select(CsvCell)));
             }
         }
 
@@ -504,6 +515,26 @@
         {
             //Log.Error(ex, "Uh oh! SSNScanner.razor -> ExportAsync() has caught an exception!");
         }
+    }
+
+    /// <summary>
+    /// Quotes one CSV cell and defuses spreadsheet formula injection.
+    ///
+    /// Excerpt text comes from the scanned file, and Excel or Sheets will
+    /// execute a cell beginning with = + - @ or a control character. Without
+    /// the leading apostrophe a crafted source file turns this export into
+    /// code execution on whoever opens it.
+    /// </summary>
+    private static string CsvCell(string value)
+    {
+        value ??= string.Empty;
+
+        if (value.Length > 0 && "=+-@\t\r".IndexOf(value[0]) >= 0)
+        {
+            value = "'" + value;
+        }
+
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
     }
 
     /// <summary>Drops every copy this page is holding.</summary>
@@ -691,12 +722,25 @@
     private const int BandHigh = 6;
     private const int BandMedium = 3;
 
+    /// <summary>
+    /// Ceiling on findings kept from one file. Without it a file that is
+    /// mostly SSN-shaped digits produces millions of cards and exhausts both
+    /// server memory and the browser.
+    /// </summary>
+    private const int MaxFindings = 5000;
+
     private const int RepeatLimit = 10;        // occurrences before a value reads as a sentinel
     private const int LabelAdjacentGap = 12;   // chars allowed between a label and the digits
     private const int LabelWindow = 60;
     private const int NegativeWindow = 40;
 
     private const string Dashes = "-\u2013\u2014";   // hyphen, en dash, em dash
+
+    /// <summary>
+    /// Ceiling on any single regex match against uploaded text, so a
+    /// pathological input cannot pin the request thread indefinitely.
+    /// </summary>
+    private static readonly TimeSpan RegexLimit = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// 3-2-4 digits with an optional consistent separator. The dot guards are
@@ -708,18 +752,18 @@
         @"([0-9]{2})((?:[ \t]*[" + Dashes + @".][ \t]*|[ \t])?)" +
         @"([0-9]{4})" +
         @"(?![0-9" + Dashes + @"])(?!\.[0-9])",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimit);
 
     /// <summary>Values someone has already redacted: XXX-XX-1234, ***-**-1234.</summary>
     private static readonly Regex MaskedPattern = new(
         @"(?<![0-9A-Za-z])[X*x#\u2022]{3}[- .]?[X*x#\u2022]{2}[- .]?([0-9]{4})(?![0-9])",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimit);
 
     private static readonly Regex PositiveLabel = new(
         @"(ssn|ss\s*#|s\.s\.|social\s*security|socsec|soc\s*sec" +
         @"|taxpayer\s*id|tax\s*id|\btin\b|\bitin\b|national\s*id" +
         @"|so\s*bao\s*hiem\s*xa\s*hoi)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
 
     private static readonly Regex NegativeLabel = new(
         @"(invoice|order\s*(no|num|number|#)|account\s*(no|num|number|#)|acct" +
@@ -727,20 +771,20 @@
         @"|tracking|confirmation|reference|\bref\b|badge|employee\s*(id|no|#)" +
         @"|\bein\b|routing|check\s*(no|number)|serial|asset\s*tag|ticket" +
         @"|incident|purchase\s*order|\bpo\s*#|zip|postal|license|plate)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
 
     private static readonly Regex DobLabel = new(
         @"(\bdob\b|date\s*of\s*birth|birth\s*date|\bborn\b" +
         @"|\b(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/(19|20)[0-9]{2}\b)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
 
     private static readonly Regex CurrencyBefore =
-        new(@"[$\u20ac\u00a3\u00a5]\s*$", RegexOptions.Compiled);
+        new(@"[$\u20ac\u00a3\u00a5]\s*$", RegexOptions.Compiled, RegexLimit);
 
     private static readonly Regex CurrencyAfter =
-        new(@"^\s*(%|USD|EUR|dollars?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        new(@"^\s*(%|USD|EUR|dollars?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
 
-    private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled);
+    private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled, RegexLimit);
 
     private static readonly char[] Delimiters = { ',', '\t', '|', ';' };
 
@@ -1053,10 +1097,11 @@
     }
 
     /// <summary>Widens a window so a character cut never slices a match in half.</summary>
-    private static (int Lo, int Hi) Snap(int lo, int hi, List<RawMatch> matches)
+    private static (int Lo, int Hi) Snap(int lo, int hi, List<RawMatch> matches, int from)
     {
-        foreach (RawMatch m in matches)
+        for (int i = from; i < matches.Count; i++)
         {
+            RawMatch m = matches[i];
             if (m.Start >= hi) { break; }
             if (m.End <= lo) { continue; }
             lo = Math.Min(lo, m.Start);
@@ -1081,19 +1126,28 @@
         }
 
         var tally = matches.GroupBy(m => m.Digits).ToDictionary(g => g.Key, g => g.Count());
-        var findings = new List<Finding>(matches.Count);
+        int keep = Math.Min(matches.Count, MaxFindings);
+        var findings = new List<Finding>(keep);
 
-        for (int n = 0; n < matches.Count; n++)
+        // Window starts never move backwards, so one advancing cursor replaces
+        // a fresh scan of the match list per finding.
+        int cursor = 0;
+
+        for (int n = 0; n < keep; n++)
         {
             RawMatch mt = matches[n];
             var (band, points, reasons, itin) =
                 ScoreMatch(text, mt, tally[mt.Digits], source.Tabular);
 
-            var (lo, _) = Snap(Math.Max(0, mt.Start - contextChars), mt.Start, matches);
-            var (_, hi) = Snap(mt.End, Math.Min(text.Length, mt.End + contextChars), matches);
+            int windowLo = Math.Max(0, mt.Start - contextChars);
+            while (cursor < matches.Count && matches[cursor].End <= windowLo) { cursor++; }
 
-            List<Seg2> before = Segments(text, lo, mt.Start, matches);
-            List<Seg2> after = Segments(text, mt.End, hi, matches);
+            var (lo, _) = Snap(windowLo, mt.Start, matches, cursor);
+            var (_, hi) = Snap(mt.End, Math.Min(text.Length, mt.End + contextChars),
+                               matches, cursor);
+
+            List<Seg2> before = Segments(text, lo, mt.Start, matches, cursor);
+            List<Seg2> after = Segments(text, mt.End, hi, matches, cursor);
 
             int found = newlines.BinarySearch(mt.Start);
             int priorLines = found >= 0 ? found : ~found;
@@ -1150,17 +1204,86 @@
     private static readonly string[] TextExts =
         { ".txt", ".log", ".md", ".json", ".htm", ".html" };
 
-    private static readonly Regex PdfNumber = new(@"\G-?[\d.]+", RegexOptions.Compiled);
-    private static readonly Regex PdfOperator = new(@"\G[A-Za-z'""*]+", RegexOptions.Compiled);
-    private static readonly Regex PdfStreamStart = new("stream\r?\n", RegexOptions.Compiled);
-    private static readonly Regex PdfEncrypted = new(@"/Encrypt\b", RegexOptions.Compiled);
-    private static readonly Regex PdfPage = new(@"/Type\s*/Page\b", RegexOptions.Compiled);
-    private static readonly Regex NonHex = new("[^0-9A-Fa-f]", RegexOptions.Compiled);
+    private static readonly Regex PdfNumber = new(@"\G-?[\d.]+", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfOperator = new(@"\G[A-Za-z'""*]+", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfStreamStart = new("stream\r?\n", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfEncrypted = new(@"/Encrypt\b", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfPage = new(@"/Type\s*/Page\b", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex NonHex = new("[^0-9A-Fa-f]", RegexOptions.Compiled, RegexLimit);
+
+    /// <summary>
+    /// File types refused before parsing. Nothing here is ever written to
+    /// disk or executed, so this is hygiene rather than exploit prevention:
+    /// it keeps program code out of server memory, off the pagefile and out
+    /// of any crash dump, and stops EDR alerting on a scanner process holding
+    /// PE bytes.
+    ///
+    /// Signatures, not extensions. Renaming evil.exe to data.txt defeats an
+    /// extension check completely.
+    /// </summary>
+    private static readonly (byte[] Magic, string Kind)[] BlockedSignatures =
+    {
+        (new byte[] { 0x4D, 0x5A }, "a Windows executable"),
+        (new byte[] { 0x7F, 0x45, 0x4C, 0x46 }, "a Linux executable"),
+        (new byte[] { 0xFE, 0xED, 0xFA, 0xCE }, "a macOS executable"),
+        (new byte[] { 0xFE, 0xED, 0xFA, 0xCF }, "a macOS executable"),
+        (new byte[] { 0xCE, 0xFA, 0xED, 0xFE }, "a macOS executable"),
+        (new byte[] { 0xCF, 0xFA, 0xED, 0xFE }, "a macOS executable"),
+        (new byte[] { 0xCA, 0xFE, 0xBA, 0xBE }, "compiled Java or a macOS binary"),
+        (new byte[] { 0x64, 0x65, 0x78, 0x0A }, "an Android executable"),
+        (new byte[] { 0x4D, 0x53, 0x43, 0x46 }, "a Windows cabinet"),
+        (new byte[] { 0xD0, 0xCF, 0x11, 0xE0 }, "an installer or legacy Office file"),
+        (new byte[] { 0x23, 0x21 }, "a script with a shebang"),
+    };
+
+    /// <summary>
+    /// Names Windows treats as executable regardless of content. Caught by
+    /// name because these are plain text and have no signature to match.
+    /// </summary>
+    private static readonly string[] BlockedExtensions =
+    {
+        ".exe", ".dll", ".sys", ".scr", ".com", ".pif", ".cpl", ".ocx", ".drv",
+        ".msi", ".msp", ".msc", ".jar", ".apk", ".app",
+        ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
+        ".wsf", ".wsh", ".hta", ".sh", ".reg", ".lnk", ".scf", ".inf",
+    };
+
+    /// <summary>Refuses program code before any parser touches the bytes.</summary>
+    private static void RejectExecutable(byte[] data, string name)
+    {
+        foreach ((byte[] magic, string kind) in BlockedSignatures)
+        {
+            if (data.Length < magic.Length) { continue; }
+
+            bool hit = true;
+            for (int i = 0; i < magic.Length; i++)
+            {
+                if (data[i] != magic[i]) { hit = false; break; }
+            }
+
+            if (hit)
+            {
+                throw new ScanFileException(
+                    $"This file starts with the signature of {kind}. Only data " +
+                    "files are accepted, whatever the file is named.");
+            }
+        }
+
+        foreach (string ext in BlockedExtensions)
+        {
+            if (name.EndsWith(ext, StringComparison.Ordinal))
+            {
+                throw new ScanFileException(
+                    $"A {ext} file is program code, not data, so it is not accepted.");
+            }
+        }
+    }
 
     /// <summary>Reads a file's bytes into text, dispatching on signature then extension.</summary>
     private static Extracted Extract(byte[] data, string filename)
     {
         string name = (filename ?? string.Empty).ToLowerInvariant();
+        RejectExecutable(data, name);
 
         if (Starts(data, "%PDF") || name.EndsWith(".pdf")) { return ReadPdf(data); }
 

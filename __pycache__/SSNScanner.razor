@@ -34,9 +34,13 @@
 @{
     RenderFragment<SegCtx> Seg = ctx =>
     @<text>
-        @if (!ctx.Seg.IsSsn)
+        @if (ctx.Seg.Kind == SegKind.Text)
         {
             @ctx.Seg.Text
+        }
+        else if (ctx.Seg.Kind == SegKind.Label)
+        {
+            <span class="sw-label">@ctx.Seg.Text</span>
         }
         else
         {
@@ -70,9 +74,9 @@
         <div class="sw-dropzone">
             <div class="sw-dropzone-icon" aria-hidden="true"></div>
             <p class="sw-dropzone-title">Choose a file to scan</p>
-            <p class="sw-dropzone-sub">.txt, .csv, .tsv, .xlsx or .pdf</p>
+            <p class="sw-dropzone-sub">.txt, .csv, .tsv, .xml, .xlsx or .pdf</p>
             <InputFile OnChange="OnFileChosen"
-                       accept=".txt,.log,.csv,.tsv,.xlsx,.xlsm,.pdf" />
+                       accept=".txt,.log,.csv,.tsv,.xml,.config,.xsd,.xlsx,.xlsm,.pdf" />
         </div>
 
         <details class="sw-paste">
@@ -126,21 +130,6 @@
                         <b>Values are visible.</b> They are also in anything you copy
                         or export while this is on, and the Windows clipboard keeps
                         a history.
-                    </div>
-                </div>
-            }
-
-            @if (counts.Clustered > 0)
-            {
-                <div class="sw-notice">
-                    <span aria-hidden="true">&#9679;</span>
-                    <div>
-                        <b>
-                            @counts.Clustered excerpt@(counts.Clustered == 1 ? "" : "s")
-                            contain another person's SSN.
-                        </b>
-                        Those are covered too, so a card is safe to paste into a
-                        ticket while the reveal switch is off.
                     </div>
                 </div>
             }
@@ -629,16 +618,33 @@
         public ScanFileException(string message) : base(message) { }
     }
 
-    /// <summary>
-    /// One piece of an excerpt: plain text, or an SSN that must be covered.
-    /// Context is returned in segments rather than as a flat string so every
-    /// match inside a window can be redacted, not only the focal one.
-    /// </summary>
-    private readonly record struct Seg2(bool IsSsn, string Text, string Last4)
+    /// <summary>What one piece of an excerpt is.</summary>
+    private enum SegKind
     {
-        public static Seg2 Plain(string text) => new(false, text, string.Empty);
+        /// <summary>Ordinary surrounding text.</summary>
+        Text,
 
-        public static Seg2 Ssn(string text, string last4) => new(true, text, last4);
+        /// <summary>A keyword the scorer treats as a label signal.</summary>
+        Label,
+
+        /// <summary>A match that must be covered until revealed.</summary>
+        Ssn
+    }
+
+    /// <summary>
+    /// One piece of an excerpt. Context is returned in segments rather than as
+    /// a flat string so every match inside a window can be redacted, not only
+    /// the focal one, and so label keywords can be highlighted in place.
+    /// </summary>
+    private readonly record struct Seg2(SegKind Kind, string Text, string Last4)
+    {
+        public static Seg2 Plain(string text) => new(SegKind.Text, text, string.Empty);
+
+        public static Seg2 Keyword(string text) => new(SegKind.Label, text, string.Empty);
+
+        public static Seg2 Ssn(string text, string last4) => new(SegKind.Ssn, text, last4);
+
+        public bool IsSsn => Kind == SegKind.Ssn;
 
         public string Render(bool masked) => IsSsn && masked ? $"***-**-{Last4}" : Text;
     }
@@ -687,9 +693,6 @@
         public int Low { get; init; }
         public int Total { get; init; }
 
-        /// <summary>Findings whose excerpt contains at least one other SSN.</summary>
-        public int Clustered { get; init; }
-
         /// <summary>Values someone had already redacted before the scan.</summary>
         public int AlreadyMasked { get; init; }
     }
@@ -702,6 +705,14 @@
         IReadOnlyList<string> Locators,
         IReadOnlyList<string> Warnings)
     {
+        /// <summary>
+        /// True only for delimited formats, where line one is a header naming
+        /// the field. Without this gate the column signal fires on any format
+        /// whose first line happens to contain commas, inventing a "column"
+        /// reason for PDF and XML hits.
+        /// </summary>
+        public bool Tabular { get; init; }
+
         /// <summary>Maps a one-based line number to its human-readable position.</summary>
         public string Locate(int line) =>
             line >= 1 && line <= Locators.Count ? Locators[line - 1] : $"line {line}";
@@ -927,7 +938,7 @@
 
     /// <summary>Weighs every signal for one candidate.</summary>
     private static (Band Band, int Points, List<string> Reasons, bool Itin) ScoreMatch(
-        string text, RawMatch mt, int occurrences)
+        string text, RawMatch mt, int occurrences, bool tabular)
     {
         int points = 0;
         var reasons = new List<string>();
@@ -1004,7 +1015,7 @@
             reasons.Add($"reads as \"{negText.ToLowerInvariant()}\", not an SSN");
         }
 
-        string? header = CsvColumn(text, mt.Start);
+        string? header = tabular ? CsvColumn(text, mt.Start) : null;
         if (header is not null)
         {
             string shown = header.Length <= 32 ? header : header[..32];
@@ -1068,7 +1079,30 @@
     }
 
     /// <summary>
-    /// Slices a window into plain-text and SSN segments. Every match falling
+    /// Appends a run of ordinary text, splitting out any label keyword so the
+    /// UI can highlight it.
+    ///
+    /// This deliberately reuses PositiveLabel, the same pattern that awards
+    /// the label points, so a highlight always corresponds to a signal that
+    /// moved the score. Widening it here without widening the scorer would
+    /// produce highlights that explain nothing.
+    /// </summary>
+    private static void AddText(List<Seg2> segs, string chunk)
+    {
+        int cursor = 0;
+
+        foreach (Match m in PositiveLabel.Matches(chunk))
+        {
+            if (m.Index > cursor) { segs.Add(Seg2.Plain(chunk[cursor..m.Index])); }
+            segs.Add(Seg2.Keyword(m.Value));
+            cursor = m.Index + m.Length;
+        }
+
+        if (cursor < chunk.Length) { segs.Add(Seg2.Plain(chunk[cursor..])); }
+    }
+
+    /// <summary>
+    /// Slices a window into text, label and SSN segments. Every match falling
     /// inside becomes its own segment so the UI can redact all of them.
     /// </summary>
     private static List<Seg2> Segments(string text, int lo, int hi, List<RawMatch> matches)
@@ -1085,25 +1119,26 @@
 
             int s = Math.Max(m.Start, lo);
             int e = Math.Min(m.End, hi);
-            if (s > cursor) { segs.Add(Seg2.Plain(Whitespace.Replace(text[cursor..s], " "))); }
+            if (s > cursor) { AddText(segs, Whitespace.Replace(text[cursor..s], " ")); }
 
             segs.Add(Seg2.Ssn(text[s..e], m.Serial));
             cursor = e;
         }
 
-        if (cursor < hi) { segs.Add(Seg2.Plain(Whitespace.Replace(text[cursor..hi], " "))); }
+        if (cursor < hi) { AddText(segs, Whitespace.Replace(text[cursor..hi], " ")); }
 
-        if (segs.Count > 0 && !segs[0].IsSsn)
+        // trim only the outer edges, and only when they are ordinary text
+        if (segs.Count > 0 && segs[0].Kind == SegKind.Text)
         {
             segs[0] = Seg2.Plain(segs[0].Text.TrimStart());
         }
 
-        if (segs.Count > 0 && !segs[^1].IsSsn)
+        if (segs.Count > 0 && segs[^1].Kind == SegKind.Text)
         {
             segs[^1] = Seg2.Plain(segs[^1].Text.TrimEnd());
         }
 
-        return segs.Where(s => s.IsSsn || s.Text.Length > 0).ToList();
+        return segs.Where(s => s.Kind != SegKind.Text || s.Text.Length > 0).ToList();
     }
 
     /// <summary>
@@ -1147,7 +1182,8 @@
         for (int n = 0; n < matches.Count; n++)
         {
             RawMatch mt = matches[n];
-            var (band, points, reasons, itin) = ScoreMatch(text, mt, tally[mt.Digits]);
+            var (band, points, reasons, itin) =
+                ScoreMatch(text, mt, tally[mt.Digits], source.Tabular);
 
             var (lo, _) = Snap(Math.Max(0, mt.Start - contextChars), mt.Start, matches);
             var (_, hi) = Snap(mt.End, Math.Min(text.Length, mt.End + contextChars), matches);
@@ -1192,7 +1228,6 @@
         Medium = findings.Count(f => f.Confidence == Band.Medium),
         Low = findings.Count(f => f.Confidence == Band.Low),
         Total = findings.Count,
-        Clustered = findings.Count(f => f.Neighbors > 0),
         AlreadyMasked = MaskedPattern.Matches(text).Count,
     };
 
@@ -1215,7 +1250,7 @@
         "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}";
 
     private static readonly string[] TextExts =
-        { ".txt", ".log", ".md", ".json", ".xml", ".htm", ".html" };
+        { ".txt", ".log", ".md", ".json", ".htm", ".html" };
 
     // \G anchors at the supplied offset, so these run against the whole
     // stream without slicing it. Matching against content[i..] instead would
@@ -1242,6 +1277,11 @@
 
         if (name.EndsWith(".csv") || name.EndsWith(".tsv")) { return ReadCsv(data, name); }
 
+        if (name.EndsWith(".xml") || name.EndsWith(".config") || name.EndsWith(".xsd"))
+        {
+            return ReadXml(data);
+        }
+
         if (Starts(data, "PK"))
         {
             throw new ScanFileException(
@@ -1253,9 +1293,15 @@
         {
             throw new ScanFileException(
                 "This file looks binary. Supported formats are .txt, .csv, .tsv, " +
-                ".xlsx and .pdf.");
+                ".xml, .xlsx and .pdf.");
         }
 
+        return ReadPlainText(data);
+    }
+
+    /// <summary>Decodes a file as flat text, one locator per line.</summary>
+    private static Extracted ReadPlainText(byte[] data)
+    {
         string text = Decode(data);
         int lines = text.Count(c => c == '\n') + 1;
         return new Extracted(text, "text", $"{lines} lines",
@@ -1321,7 +1367,8 @@
         }
 
         return new Extracted(string.Join('\n', rows), "csv",
-            $"{rows.Count} rows, delimiter '{delim}'", locators, Array.Empty<string>());
+            $"{rows.Count} rows, delimiter '{delim}'", locators, Array.Empty<string>())
+        { Tabular = true };
     }
 
     /// <summary>
@@ -1475,7 +1522,8 @@
             }
 
             return new Extracted(string.Join('\n', lines), "xlsx",
-                $"{sheets.Count} sheet(s), {lines.Count} rows", locators, warnings);
+                $"{sheets.Count} sheet(s), {lines.Count} rows", locators, warnings)
+            { Tabular = true };
         }
     }
 
@@ -1621,6 +1669,126 @@
         }
 
         return value.Value;
+    }
+
+    // ---- xml -----------------------------------------------------------
+
+    /// <summary>
+    /// Reads an XML document as one line per text node, attribute and comment,
+    /// with the element path as the locator so a finding reports something
+    /// like "Members/Member/SSN" rather than a line number.
+    ///
+    /// Each line is written as "name: value". That is not cosmetic: it puts
+    /// the element or attribute name directly in front of the digits, so
+    /// &lt;SSN&gt;412-70-1901&lt;/SSN&gt; earns the label-adjacency points it
+    /// should, and the name is highlighted in the excerpt.
+    ///
+    /// Hardened the same way as the spreadsheet parts. A user-supplied XML
+    /// file is an XXE and entity-expansion vector, so DTDs and entities are
+    /// refused outright rather than merely disabled.
+    /// </summary>
+    private static Extracted ReadXml(byte[] data)
+    {
+        string head = Encoding.Latin1.GetString(data, 0, Math.Min(data.Length, 65536));
+        if (head.Contains("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            head.Contains("<!ENTITY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ScanFileException(
+                "This XML declares a DTD or entity. Those are an entity-expansion " +
+                "and external-reference risk and are not needed by a data export, " +
+                "so the file is refused.");
+        }
+
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersFromEntities = 0,
+            IgnoreWhitespace = true,
+            IgnoreProcessingInstructions = true,
+        };
+
+        var lines = new List<string>();
+        var locators = new List<string>();
+        var warnings = new List<string>();
+        var path = new Stack<string>();
+
+        string CurrentPath() => string.Join('/', path.Reverse());
+
+        try
+        {
+            using var reader = XmlReader.Create(new MemoryStream(data, writable: false), settings);
+
+            while (reader.Read())
+            {
+                switch (reader.NodeType)
+                {
+                    case XmlNodeType.Element:
+                        bool empty = reader.IsEmptyElement;
+                        path.Push(reader.Name);
+
+                        if (reader.HasAttributes)
+                        {
+                            string owner = CurrentPath();
+                            while (reader.MoveToNextAttribute())
+                            {
+                                if (reader.Value.Trim().Length == 0) { continue; }
+                                lines.Add($"{reader.Name}: {reader.Value.Trim()}");
+                                locators.Add($"{owner}/@{reader.Name}");
+                            }
+
+                            reader.MoveToElement();
+                        }
+
+                        if (empty) { path.Pop(); }
+                        break;
+
+                    case XmlNodeType.EndElement:
+                        if (path.Count > 0) { path.Pop(); }
+                        break;
+
+                    case XmlNodeType.Text:
+                    case XmlNodeType.CDATA:
+                        if (reader.Value.Trim().Length == 0) { break; }
+                        lines.Add($"{(path.Count > 0 ? path.Peek() : "value")}: " +
+                                  reader.Value.Trim());
+                        locators.Add(CurrentPath());
+                        break;
+
+                    case XmlNodeType.Comment:
+                        // comments are a favourite place for pasted sample data
+                        if (reader.Value.Trim().Length == 0) { break; }
+                        lines.Add($"comment: {reader.Value.Trim()}");
+                        locators.Add($"{CurrentPath()} (comment)");
+                        break;
+                }
+            }
+        }
+        catch (XmlException exc)
+        {
+            // A malformed export is common and still worth scanning, so fall
+            // back to flat text rather than refusing. Say so, loudly, because
+            // the element-path locators are lost when this happens.
+            Extracted plain = ReadPlainText(data);
+            return plain with
+            {
+                Format = "xml",
+                Detail = $"{plain.Detail}, read as flat text",
+                Warnings = new[]
+                {
+                    "This XML is malformed and was scanned as plain text instead: " +
+                    exc.Message + " Positions below are line numbers, not element paths."
+                }
+            };
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ScanFileException("This XML document has no text content.");
+        }
+
+        return new Extracted(string.Join('\n', lines), "xml",
+            $"{lines.Count} value(s)", locators, warnings);
     }
 
     // ---- pdf -----------------------------------------------------------

@@ -40,6 +40,8 @@
     --sw-amber: #B45309;
     --sw-amber-soft: #FDF3E4;
     --sw-slate-soft: #EEF1F5;
+    --sw-mark: #D6E7F5;
+    --sw-mark-text: #1B4F72;
 
     --sw-radius: 14px;
     --sw-radius-sm: 9px;
@@ -74,6 +76,8 @@
         --sw-amber: #E0A244;
         --sw-amber-soft: #241C10;
         --sw-slate-soft: #212932;
+        --sw-mark: #1B3145;
+        --sw-mark-text: #A6CDEB;
         --sw-shadow: 0 1px 2px rgba(0, 0, 0, .4);
     }
 }
@@ -564,6 +568,20 @@
     border: 1px solid var(--sw-line-soft);
     border-radius: 999px;
     padding: 3px 10px;
+}
+
+/* ---- label keywords ----
+
+   Highlighted because the scorer treated them as a signal, so a highlight
+   always explains part of the score. Blue, never red: red is reserved for
+   values that are actually PII. */
+
+.ssn-sweep .sw-label {
+    background: var(--sw-mark);
+    color: var(--sw-mark-text);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-weight: 700;
 }
 
 /* ---- redaction: solid block over the hidden digits, click to peel ---- */

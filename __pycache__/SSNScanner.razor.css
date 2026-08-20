@@ -244,9 +244,13 @@
 }
 
 .ssn-sweep .sw-loaded {
-    font-size: 13px;
-    color: var(--sw-text-2);
     font-family: var(--sw-mono);
+    font-size: 13px;
+    font-weight: 700;
+    background: var(--sw-mark);
+    color: var(--sw-mark-text);
+    border-radius: 3px;
+    padding: 2px 7px;
 }
 
 .ssn-sweep .sw-actions {
@@ -399,10 +403,16 @@
     cursor: pointer;
 }
 
+.ssn-sweep .sw-segmented button.sw-on,
 .ssn-sweep .sw-segmented button[aria-pressed="true"] {
+    background: var(--sw-text);
+    color: var(--sw-surface);
+    font-weight: 650;
+}
+
+.ssn-sweep .sw-segmented button:not(.sw-on):hover {
     background: var(--sw-surface);
     color: var(--sw-text);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
 }
 
 .ssn-sweep .sw-right {

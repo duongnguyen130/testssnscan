@@ -142,7 +142,8 @@
                     @foreach (string f in Filters)
                     {
                         string bandName = f;
-                        <button type="button" aria-pressed="@(activeFilter == bandName)"
+                        <button type="button" class="@FilterClass(bandName)"
+                                aria-pressed="@Pressed(activeFilter == bandName)"
                                 @onclick="() => activeFilter = bandName">@bandName</button>
                     }
                 </div>
@@ -295,6 +296,15 @@
     /// literals inside a double-quoted Razor attribute is a parsing hazard.
     /// </summary>
     private static string HitClass(bool focal) => focal ? "sw-hit sw-focal" : "sw-hit";
+
+    /// <summary>
+    /// aria-pressed as a literal string. A C# bool would be rendered as a
+    /// boolean attribute instead, which never matches [aria-pressed="true"].
+    /// </summary>
+    private static string Pressed(bool on) => on ? "true" : "false";
+
+    /// <summary>Marks the selected band filter.</summary>
+    private string FilterClass(string band) => activeFilter == band ? "sw-on" : string.Empty;
 
     /// <summary>Findings matching the current band filter.</summary>
     private IEnumerable<Finding> VisibleFindings() =>

@@ -24,7 +24,7 @@
 @*START HTML*@
 
 @* Renders one piece of an excerpt: plain text, a highlighted keyword, or a
-   covered value. Values stay covered; clicking one copies it. *@
+   detected value. Clicking a value copies it. *@
 @{
     RenderFragment<SegCtx> Seg = ctx =>
     @<text>
@@ -40,10 +40,7 @@
         {
             <button type="button" class="@HitClass(ctx.Focal)"
                     title="Click to copy this number"
-                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">
-                <span class="sw-cover"
-                      style="width:@(Math.Max(ctx.Seg.Text.Length - 4, 1))ch"></span>@ctx.Seg.Last4
-            </button>
+                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">@ctx.Seg.Text</button>
         }
     </text>;
 }
@@ -60,11 +57,15 @@
         </div>
 
         <div class="sw-dropzone">
-            <div class="sw-dropzone-icon" aria-hidden="true"></div>
-            <p class="sw-dropzone-title">Choose a file to scan</p>
-            <p class="sw-dropzone-sub">.txt, .csv, .tsv, .xml, .xlsx or .pdf</p>
-            <InputFile OnChange="OnFileChosen"
-                       accept=".txt,.log,.csv,.tsv,.xml,.config,.xsd,.xlsx,.xlsm,.pdf" />
+            <InputFile OnChange="OnFileChosen" class="sw-fileinput" />
+            <div class="sw-dropzone-inner">
+                <div class="sw-dropzone-icon" aria-hidden="true"></div>
+                <p class="sw-dropzone-title">Drop a file here, or click to browse</p>
+                <p class="sw-dropzone-sub">
+                    Reads .txt, .csv, .tsv, .xml, .xlsx and .pdf. Any other file is
+                    scanned for readable text.
+                </p>
+            </div>
         </div>
 
         <details class="sw-paste">
@@ -1150,21 +1151,106 @@
             return ReadXml(data);
         }
 
+        // A zip that is not a workbook is refused rather than scanned. Its
+        // contents are compressed, so a text pass would find nothing and
+        // report a clean result for a file that was never really read.
         if (Starts(data, "PK"))
         {
             throw new ScanFileException(
-                "This looks like a zip-based Office file. Only .xlsx is supported; " +
-                "export .docx or .pptx content to text first.");
+                "This is a zip-based file. Its contents are compressed, so scanning " +
+                "it would report a false all-clear. Only .xlsx can be opened; export " +
+                "a .docx or .pptx to text first.");
         }
 
-        if (data.Take(2048).Contains((byte)0) && !TextExts.Any(name.EndsWith))
+        if (data.Take(4096).Contains((byte)0) && !TextExts.Any(name.EndsWith))
         {
-            throw new ScanFileException(
-                "This file looks binary. Supported formats are .txt, .csv, .tsv, " +
-                ".xml, .xlsx and .pdf.");
+            return ReadStrings(data);
         }
 
         return ReadPlainText(data);
+    }
+
+    /// <summary>
+    /// Pulls readable text runs out of a file in an unrecognised format, the
+    /// way the strings utility does, so an SSN sitting in a binary export is
+    /// still found without filling excerpts with control characters. Reads
+    /// both single-byte and UTF-16LE runs.
+    /// </summary>
+    private static Extracted ReadStrings(byte[] data)
+    {
+        const int minRun = 4;
+        var lines = new List<string>();
+        var locators = new List<string>();
+
+        void Flush(StringBuilder run, int startOffset)
+        {
+            if (run.Length >= minRun)
+            {
+                lines.Add(run.ToString());
+                locators.Add($"offset 0x{startOffset:X}");
+            }
+
+            run.Clear();
+        }
+
+        static bool Printable(byte b) => b == 0x09 || (b >= 0x20 && b <= 0x7E);
+
+        var ascii = new StringBuilder();
+        int asciiStart = 0;
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (Printable(data[i]))
+            {
+                if (ascii.Length == 0) { asciiStart = i; }
+                ascii.Append((char)data[i]);
+            }
+            else
+            {
+                Flush(ascii, asciiStart);
+            }
+        }
+
+        Flush(ascii, Math.Max(0, data.Length - ascii.Length));
+
+        // UTF-16LE: printable byte, zero byte, repeating. Both parities are
+        // scanned because such text is not guaranteed to start on an even
+        // offset, and an odd-aligned run would otherwise be invisible.
+        var wide = new StringBuilder();
+        int wideStart = 0;
+
+        for (int parity = 0; parity < 2; parity++)
+        {
+            for (int i = parity; i + 1 < data.Length; i += 2)
+            {
+                if (Printable(data[i]) && data[i + 1] == 0)
+                {
+                    if (wide.Length == 0) { wideStart = i; }
+                    wide.Append((char)data[i]);
+                }
+                else
+                {
+                    Flush(wide, wideStart);
+                }
+            }
+
+            Flush(wide, wideStart);
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ScanFileException(
+                "No readable text was found in this file, so there is nothing to " +
+                "scan. Treat this as unread rather than clean.");
+        }
+
+        return new Extracted(string.Join('\n', lines), "binary",
+            $"{lines.Count} text run(s)", locators, new[]
+            {
+                "This file is not a recognised text format, so only readable text " +
+                "runs were scanned. Anything compressed or encoded inside it was " +
+                "not read, and a clean result here is not proof the file is clean."
+            });
     }
 
     /// <summary>Decodes a file as flat text, one locator per line.</summary>

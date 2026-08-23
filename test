@@ -1,2 +1,4 @@
 cd /opt/nessus/var/nessus/logs/ && cutoff=$(date -d '30 days ago' +%s); for f in nessusd.dump.* nessusd.messages.* www_server.log.*; do [[ $f =~ ([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2})-([0-9]{2})-([0-9]{2})$ ]] || continue; ts=$(date -d "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}" +%s); (( ts < cutoff )) && echo "$f"; done
 cd /opt/nessus/var/nessus/logs/ && cutoff=$(date -d '30 days ago' +%s); for f in nessusd.dump.* nessusd.messages.* www_server.log.*; do [[ $f =~ ([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2})-([0-9]{2})-([0-9]{2})$ ]] || continue; ts=$(date -d "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}" +%s); (( ts < cutoff )) && sudo rm -f -- "$f"; done
+sudo ls -la /opt/nessus/var/nessus/backups/
+sudo find /opt/nessus/var/nessus/backups/ -maxdepth 1 -type f -print -delete

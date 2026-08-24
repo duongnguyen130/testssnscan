@@ -1,0 +1,112 @@
+Here's a hunt pack for T1053.005, keyed to your indexes.
+
+## 1. Baseline — all task creation
+
+```spl
+index=winevents (EventCode=4698 OR EventCode=4699 
+  OR EventCode=4700 OR EventCode=4701 OR EventCode=4702)
+| eval action=case(EventCode=4698,"Created",EventCode=4699,"Deleted",
+    EventCode=4700,"Enabled",EventCode=4701,"Disabled",EventCode=4702,"Updated")
+| stats count values(action) as actions values(Account_Name) as creator 
+    dc(ComputerName) as host_count values(ComputerName) as hosts by TaskName
+| sort + host_count
+```
+Low `host_count` = your candidates. Anything on 1–2 hosts deserves a look.
+
+## 2. Suspicious content in the task XML (4698)
+
+```spl
+index=winevents EventCode=4698
+| rex field=TaskContent "<Command>(?<task_cmd>[^<]+)</Command>"
+| rex field=TaskContent "<Arguments>(?<task_args>[^<]+)</Arguments>"
+| eval full=task_cmd." ".task_args
+| search full IN ("*powershell*","*cmd.exe*","*rundll32*","*mshta*",
+    "*wscript*","*cscript*","*regsvr32*","*certutil*","*curl*","*bitsadmin*")
+    OR full IN ("*-enc*","*-w hidden*","*FromBase64*","*DownloadString*",
+    "*\\Temp\\*","*\\AppData\\*","*\\Public\\*","*\\ProgramData\\*")
+| table _time ComputerName Account_Name TaskName task_cmd task_args
+```
+
+## 3. Create → delete churn (anti-forensics / one-shot tasks)
+
+```spl
+index=winevents (EventCode=4698 OR EventCode=4699)
+| stats min(_time) as first max(_time) as last 
+    values(EventCode) as codes by TaskName, ComputerName
+| where mvcount(codes)=2
+| eval lifespan_min=round((last-first)/60,1)
+| where lifespan_min < 60
+| convert ctime(first) ctime(last)
+```
+APT34 tradecraft fits here — tasks that exist just long enough to run.
+
+## 4. Remote task creation
+
+```spl
+index=winevents EventCode=4698
+| join type=left ComputerName 
+    [ search index=winevents EventCode=4624 Logon_Type=3 
+      | fields ComputerName, Account_Name, Source_Network_Address, _time
+      | rename Account_Name as net_account ]
+| where isnotnull(Source_Network_Address) 
+    AND Source_Network_Address!="-" AND Source_Network_Address!="127.0.0.1"
+| table _time ComputerName TaskName Account_Name net_account Source_Network_Address
+```
+Tighten the join window with `| where abs(_time - orig_time) < 300` if it's noisy.
+
+## 5. Sysmon — execution under the scheduler
+
+```spl
+index=winevents sourcetype=*Sysmon* EventCode=1
+  (ParentImage="*\\svchost.exe*" OR ParentImage="*\\taskeng.exe*" 
+   OR ParentImage="*\\taskhostw.exe*")
+| search Image IN ("*\\powershell.exe","*\\cmd.exe","*\\wscript.exe",
+    "*\\cscript.exe","*\\mshta.exe","*\\rundll32.exe","*\\regsvr32.exe")
+| stats count values(CommandLine) as cmds by Computer, User, Image
+| sort - count
+```
+
+Plus the on-disk artifacts, which catch tasks registered outside the API:
+
+```spl
+index=winevents sourcetype=*Sysmon* (EventCode=11 OR EventCode=13)
+  (TargetFilename="C:\\Windows\\System32\\Tasks\\*" 
+   OR TargetObject="*\\CurrentVersion\\Schedule\\TaskCache\\Tree\\*")
+| table _time Computer Image TargetFilename TargetObject User
+```
+
+## 6. schtasks.exe / at.exe invocation (covers .002)
+
+```spl
+index=winevents (EventCode=4688 OR (sourcetype=*Sysmon* EventCode=1))
+  (Image="*\\schtasks.exe" OR Image="*\\at.exe" 
+   OR New_Process_Name="*\\schtasks.exe" OR New_Process_Name="*\\at.exe")
+| eval cmd=coalesce(CommandLine, Process_Command_Line)
+| search cmd IN ("*/create*","*/change*","*/ru system*","*/s *","*/xml*")
+| table _time ComputerName Account_Name cmd
+```
+
+## 7. CrowdStrike FDR
+
+```spl
+index=crowdstrike event_simpleName IN 
+    (ScheduledTaskRegistered, ScheduledTaskModified, ScheduledTaskDeleted)
+| stats count dc(aid) as host_count values(TaskExecCommand) as cmd 
+    values(TaskAuthor) as author by TaskName, event_simpleName
+| where host_count <= 3
+```
+
+## 8. Linux side — cron (.003) and systemd timers (.006)
+
+```spl
+index=os (sourcetype=linux_secure OR sourcetype=cron OR sourcetype=syslog)
+  ("crontab" OR "CRON" OR "systemd-run" OR "systemctl" ".timer")
+| search NOT (user IN ("root","backup") AND "run-parts")
+| table _time host user process message
+```
+
+---
+
+**Two things to do before you hunt.** First, confirm your data actually covers this — run `index=winevents EventCode=4698 | stats dc(ComputerName)` against your known endpoint count. 4698 requires the "Other Object Access Events" subcategory, and it's off by default in a lot of GPO baselines. If coverage is thin, that's your Visibility column answer (Partial/No), and Sysmon + CrowdStrike carry the weight.
+
+Second, build a 30–90 day allowlist of known-good task names before running #1 and #7, otherwise Google Update, Dell/HP OEM tasks, and your patch agent will bury everything.

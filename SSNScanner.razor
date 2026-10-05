@@ -1,0 +1,2334 @@
+@page "/SSNScanner"
+@attribute [NavigationItem("SSN Scanner", NavigationIcon.SSNScanner, Order = 81)]
+@namespace WebApp.Components.Pages.SSNScanner
+@attribute [PagePermissionTitle("SSN Scanner")]
+@implements IDisposable
+@using Microsoft.JSInterop
+@using Microsoft.AspNetCore.Components.Forms
+@using System.IO.Compression
+@using System.Security.Cryptography
+@using System.Text
+@using System.Text.RegularExpressions
+@using System.Xml
+@using System.Xml.Linq
+
+@*
+    Needs an interactive render mode. On a .NET 8 Blazor Web App with per-page
+    modes, uncomment:  @rendermode InteractiveServer
+    On classic Blazor Server the page is already interactive.
+*@
+
+<PageHeader PageTitle="SSN Scanner" />
+<PageTitle>SSN Scanner</PageTitle>
+
+@*START HTML*@
+
+@* Renders one piece of an excerpt: plain text, a highlighted keyword, or a
+   detected value. Clicking a value copies it. *@
+@{
+    RenderFragment<SegCtx> Seg = ctx =>
+    @<text>
+        @if (ctx.Seg.Kind == SegKind.Text)
+        {
+            @ctx.Seg.Text
+        }
+        else if (ctx.Seg.Kind == SegKind.Label)
+        {
+            <span class="sw-label">@ctx.Seg.Text</span>
+        }
+        else
+        {
+            <button type="button" class="@HitClass(ctx.Focal)"
+                    title="Click to copy this number"
+                    @onclick="() => CopyValueAsync(ctx.Seg.Text, ctx.Id)">@ctx.Seg.Render(!revealAll)</button>
+        }
+    </text>;
+}
+
+<div class="ssn-sweep">
+
+    <section class="sw-card sw-intake">
+        <div class="sw-card-head">
+            <h2>Scan a file for exposed SSNs</h2>
+            <p class="sw-sub">
+                Every match is redacted until you choose to reveal it, including
+                other people's numbers that fall inside the same excerpt.
+            </p>
+        </div>
+
+        <div class="sw-dropzone">
+            <InputFile OnChange="OnFileChosen" class="sw-fileinput" />
+            <div class="sw-dropzone-inner">
+                <div class="sw-dropzone-icon" aria-hidden="true"></div>
+                <p class="sw-dropzone-title">Drop a file here, or click to browse</p>
+                <p class="sw-dropzone-sub">
+                    Reads .txt, .csv, .tsv, .xml, .xlsx and .pdf. Any other file is
+                    scanned for readable text.
+                </p>
+            </div>
+        </div>
+
+        <details class="sw-paste">
+            <summary>Paste text instead</summary>
+            <textarea @bind="pastedText" @bind:event="oninput" rows="6" spellcheck="false"
+                      autocomplete="off" placeholder="Paste the contents here."></textarea>
+        </details>
+
+        <div class="sw-controls">
+            <label class="sw-stepper">
+                <span>Context</span>
+                <input type="number" @bind="contextChars" min="1" max="2000" />
+                <span class="sw-unit">characters each side</span>
+            </label>
+
+            @if (loadedLabel is not null)
+            {
+                <span class="sw-loaded">@loadedLabel</span>
+            }
+
+            <div class="sw-actions">
+                <button type="button" class="sw-btn sw-btn-ghost" @onclick="Wipe">Clear</button>
+                <button type="button" class="sw-btn sw-btn-primary"
+                        @onclick="ScanAsync" disabled="@isBusy">
+                    @(isBusy ? "Scanning..." : "Scan")
+                </button>
+            </div>
+        </div>
+    </section>
+
+    @if (errorMessage is not null)
+    {
+        <div class="sw-err">@errorMessage</div>
+    }
+    else if (counts is not null)
+    {
+        <section class="sw-results">
+
+            <div class="sw-stats">
+                <div class="sw-stat"><b>@counts.Total</b><span>candidates</span></div>
+                <div class="sw-stat sw-is-high"><b>@counts.High</b><span>high</span></div>
+                <div class="sw-stat sw-is-medium"><b>@counts.Medium</b><span>medium</span></div>
+                <div class="sw-stat"><b>@counts.Low</b><span>low</span></div>
+            </div>
+
+            @if (sourceFormat is not null && sourceFormat != "text")
+            {
+                <div class="sw-notice sw-notice-quiet">
+                    <span aria-hidden="true">&#9675;</span>
+                    <div>Parsed as <b>@sourceFormat</b> &mdash; @sourceDetail</div>
+                </div>
+            }
+
+            @foreach (string w in extractionWarnings)
+            {
+                <div class="sw-notice sw-notice-quiet">
+                    <span aria-hidden="true">&#9675;</span><div>@w</div>
+                </div>
+            }
+
+            @if (counts.AlreadyMasked > 0)
+            {
+                <div class="sw-notice sw-notice-quiet">
+                    <span aria-hidden="true">&#9675;</span>
+                    <div>
+                        @counts.AlreadyMasked value@(counts.AlreadyMasked == 1 ? " was" : "s were")
+                        already redacted in this file and are not counted above.
+                    </div>
+                </div>
+            }
+
+            <div class="sw-toolbar">
+                <div class="sw-segmented">
+                    @foreach (string f in Filters)
+                    {
+                        string bandName = f;
+                        <button type="button"
+                                aria-pressed="@Pressed(activeFilter == bandName)"
+                                @onclick="() => activeFilter = bandName">@bandName</button>
+                    }
+                </div>
+
+                <div class="sw-right">
+                    <label class="sw-switch">
+                        <input type="checkbox" checked="@revealAll" @onchange="ToggleReveal" />
+                        <span class="sw-track"></span>
+                        <span>Reveal numbers</span>
+                    </label>
+                    <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
+                            @onclick='() => ExportAsync("csv")'>CSV</button>
+                    <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
+                            @onclick='() => ExportAsync("json")'>JSON</button>
+                    <button type="button" class="sw-btn sw-btn-ghost sw-btn-sm"
+                            @onclick="Wipe">Wipe</button>
+                </div>
+            </div>
+
+            @foreach (Finding f in VisibleFindings())
+            {
+                string band = f.Confidence.ToString().ToLowerInvariant();
+
+                <article class="sw-find sw-@band">
+                    <div class="sw-find-head">
+                        <span class="sw-badge sw-badge-@band">@band</span>
+
+                        @if (f.IsItin)
+                        {
+                            <span class="sw-badge">ITIN</span>
+                        }
+                        @if (f.Neighbors > 0)
+                        {
+                            <span class="sw-badge">+@f.Neighbors nearby</span>
+                        }
+                        @if (f.Occurrences > 1)
+                        {
+                            <span class="sw-badge">&times;@f.Occurrences</span>
+                        }
+                        @if (copiedId == f.Id)
+                        {
+                            <span class="sw-badge sw-copied">Copied</span>
+                        }
+                    </div>
+
+                    <div class="sw-find-body">
+                        <div class="sw-excerpt">
+                            @if (f.MoreBefore)
+                            {
+                                <span class="sw-ell">&hellip; </span>
+                            }
+
+                            @foreach (Seg2 s in f.Before)
+                            {
+                                @Seg(new SegCtx(s, f.Id, false))
+                            }
+
+                            @Seg(new SegCtx(Seg2.Ssn(f.Value), f.Id, true))
+
+                            @foreach (Seg2 s in f.After)
+                            {
+                                @Seg(new SegCtx(s, f.Id, false))
+                            }
+
+                            @if (f.MoreAfter)
+                            {
+                                <span class="sw-ell"> &hellip;</span>
+                            }
+                        </div>
+
+                        <div class="sw-reasons">
+                            <span class="sw-reason">score @f.Score.ToString("+#;-#;0")</span>
+                            @foreach (string r in f.Reasons)
+                            {
+                                <span class="sw-reason">@r</span>
+                            }
+                        </div>
+                    </div>
+                </article>
+            }
+
+            @if (!VisibleFindings().Any())
+            {
+                <div class="sw-empty">
+                    <strong>Nothing at this level</strong><span>Try another filter.</span>
+                </div>
+            }
+
+        </section>
+    }
+    else if (hasScanned)
+    {
+        <div class="sw-empty">
+            <strong>Nothing found</strong>
+            <span>No 3-2-4 digit run turned up in @sourceName.</span>
+        </div>
+    }
+
+</div>
+
+@*END HTML*@
+
+@code{
+    [Inject] private IJSRuntime _jsRuntime { get; set; } = default!;
+    private IJSObjectReference jsModule { get; set; } = null!;
+
+    /*
+     * SSN SCANNER
+     *
+     * Scans an uploaded .txt, .csv, .tsv, .xml, .xlsx or .pdf for Social
+     * Security Numbers and shows each one in context, scored high, medium or
+     * low, with the reasons for the score.
+     *
+     * Values are redacted until revealed. Every SSN in an excerpt is covered,
+     * not only the focal one, so a card is safe to screenshot. Nothing is
+     * retained: findings are dropped on Wipe and Dispose.
+     *
+     * An SSN has no checksum, so the score is a ranking, not a verdict. Low
+     * does not mean safe -- a bare, unlabelled SSN scores like a batch number.
+     */
+
+    // ====================================================================
+    // page state
+    // ====================================================================
+
+    /// <summary>Largest upload accepted. Must not exceed the SignalR message cap.</summary>
+    private const long MaxUploadBytes = 25L * 1024 * 1024;
+
+    private static readonly string[] Filters = { "all", "high", "medium", "low" };
+
+    private string pastedText = string.Empty;
+    private int contextChars = DefaultContextChars;
+
+    private IBrowserFile? chosenFile;
+    private string? loadedLabel;
+    private string sourceName = "pasted text";
+    private string? sourceFormat;
+    private string? sourceDetail;
+    private IReadOnlyList<string> extractionWarnings = Array.Empty<string>();
+
+    private List<Finding> findings = new();
+    private Counts? counts;
+    private string activeFilter = "all";
+
+    /// <summary>
+    /// Whether values are shown in full. On by default; switching it off
+    /// redacts every value on screen and in any export taken afterwards.
+    /// Clicking a value still copies the real number either way.
+    /// </summary>
+    private bool revealAll = true;
+    private int copiedId = -1;
+
+    private string? errorMessage;
+    private bool isBusy;
+    private bool hasScanned;
+
+    /// <summary>Context passed to the segment template.</summary>
+    private readonly record struct SegCtx(Seg2 Seg, int Id, bool Focal);
+
+    /// <summary>
+    /// Class list for one detected value. Built here because nested string
+    /// literals in a double-quoted Razor attribute are a parsing hazard.
+    /// </summary>
+    private static string HitClass(bool focal) => focal ? "sw-hit sw-focal" : "sw-hit";
+
+    /// <summary>
+    /// aria-pressed as a literal string. A C# bool renders as a boolean
+    /// attribute, which never matches [aria-pressed="true"].
+    /// </summary>
+    private static string Pressed(bool on) => on ? "true" : "false";
+
+    /// <summary>Findings matching the current band filter.</summary>
+    private IEnumerable<Finding> VisibleFindings() =>
+        activeFilter == "all"
+            ? findings
+            : findings.Where(f =>
+                f.Confidence.ToString().Equals(activeFilter, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Accepts a chosen file. Nothing is read until Scan is pressed.</summary>
+    private void OnFileChosen(InputFileChangeEventArgs e)
+    {
+        chosenFile = e.File;
+        pastedText = string.Empty;
+        sourceName = e.File.Name;
+        loadedLabel = $"{e.File.Name} - {e.File.Size / 1024:N0} KB";
+        errorMessage = null;
+    }
+
+    /// <summary>Reads the chosen file or pasted text, scans it, and zeroes the buffer.</summary>
+    private async Task ScanAsync()
+    {
+        isBusy = true;
+        errorMessage = null;
+        byte[]? data = null;
+
+        try
+        {
+            if (chosenFile is not null)
+            {
+                if (chosenFile.Size > MaxUploadBytes)
+                {
+                    errorMessage = $"That file is over {MaxUploadBytes / 1048576} MB. " +
+                                   "Split it and scan the pieces.";
+                    return;
+                }
+
+                data = new byte[chosenFile.Size];
+                await using Stream stream = chosenFile.OpenReadStream(MaxUploadBytes);
+
+                    // browser streams return short reads
+                int filled = 0;
+                while (filled < data.Length)
+                {
+                    int read = await stream.ReadAsync(data.AsMemory(filled));
+                    if (read == 0) { break; }
+                    filled += read;
+                }
+
+                if (filled != data.Length)
+                {
+                    errorMessage = "The upload was truncated. Try again.";
+                    return;
+                }
+            }
+            else if (pastedText.Trim().Length > 0)
+            {
+                data = Encoding.UTF8.GetBytes(pastedText);
+                sourceName = "pasted text";
+            }
+            else
+            {
+                errorMessage = "Add a file or paste some text first.";
+                return;
+            }
+
+            Extracted source = Extract(data, sourceName);
+            findings = Scan(source, contextChars);
+            counts = Summarize(findings, source.Text);
+            sourceFormat = source.Format;
+            sourceDetail = source.Detail;
+            extractionWarnings = source.Warnings;
+
+            copiedId = -1;
+            hasScanned = true;
+            pastedText = string.Empty;
+
+            if (findings.Count == MaxFindings)
+            {
+                extractionWarnings = extractionWarnings
+                    .Append($"Stopped after {MaxFindings} findings. This file has " +
+                            "more; narrow it down and scan again.")
+                    .ToList();
+            }
+
+            if (counts.Total == 0) { counts = null; }
+        }
+        catch (ScanFileException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            errorMessage = "Scanning this file timed out. Split it and scan the pieces.";
+        }
+        catch (Exception)
+        {
+            //Log.Error(ex, "Uh oh! SSNScanner.razor -> ScanAsync() has caught an exception!");
+            errorMessage = "That file could not be parsed. If it is a .xls or .doc, " +
+                           "save it as .xlsx or export it to text first.";
+        }
+        finally
+        {
+            if (data is not null) { CryptographicOperations.ZeroMemory(data); }
+            isBusy = false;
+        }
+    }
+
+    /// <summary>Shows or hides every value on screen.</summary>
+    private void ToggleReveal(ChangeEventArgs e)
+    {
+        revealAll = e.Value is bool on && on;
+        copiedId = -1;
+    }
+
+    /// <summary>
+    /// Copies the clicked value. It comes from the segment, so clicking a
+    /// neighbour copies that neighbour, not the card's own match. The real
+    /// number is copied even while values are hidden.
+    /// </summary>
+    private async Task CopyValueAsync(string value, int findingId)
+    {
+        if (jsModule is null) { return; }
+
+        try
+        {
+            await jsModule.InvokeVoidAsync("copyText", value);
+            copiedId = findingId;
+        }
+        catch (Exception)
+        {
+            //Log.Error(ex, "Uh oh! SSNScanner.razor -> CopyValueAsync() has caught an exception!");
+        }
+    }
+
+    /// <summary>
+    /// Downloads the findings as CSV or JSON. Values follow the reveal
+    /// toggle, so an export taken while values are hidden stays redacted.
+    /// </summary>
+    private async Task ExportAsync(string kind)
+    {
+        if (jsModule is null) { return; }
+
+        bool masked = !revealAll;
+        var sb = new StringBuilder();
+
+        if (kind == "json")
+        {
+            var rows = findings.Select(f => new
+            {
+                id = f.Id,
+                confidence = f.Confidence.ToString().ToLowerInvariant(),
+                value = revealAll ? f.Value : f.Masked,
+                location = f.Location,
+                line = f.Line,
+                column = f.Column,
+                neighbors = f.Neighbors,
+                reasons = string.Join("; ", f.Reasons),
+                before = Flatten(f.Before, masked),
+                after = Flatten(f.After, masked),
+            });
+
+            sb.Append(System.Text.Json.JsonSerializer.Serialize(
+                new { source = sourceName, redacted = masked, findings = rows },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+        else
+        {
+            sb.AppendLine("id,confidence,value,location,line,column,neighbors," +
+                          "reasons,before,after");
+
+            foreach (Finding f in findings)
+            {
+                string[] cells =
+                {
+                    f.Id.ToString(),
+                    f.Confidence.ToString().ToLowerInvariant(),
+                    revealAll ? f.Value : f.Masked,
+                    f.Location,
+                    f.Line.ToString(),
+                    f.Column.ToString(),
+                    f.Neighbors.ToString(),
+                    string.Join("; ", f.Reasons),
+                    Flatten(f.Before, masked),
+                    Flatten(f.After, masked),
+                };
+
+                sb.AppendLine(string.Join(',', cells.Select(CsvCell)));
+            }
+        }
+
+        try
+        {
+            await jsModule.InvokeVoidAsync("downloadText",
+                $"ssn-sweep.{kind}",
+                kind == "json" ? "application/json" : "text/csv",
+                sb.ToString());
+        }
+        catch (Exception)
+        {
+            //Log.Error(ex, "Uh oh! SSNScanner.razor -> ExportAsync() has caught an exception!");
+        }
+    }
+
+    /// <summary>
+    /// Quotes one CSV cell and defuses spreadsheet formula injection.
+    ///
+    /// Excerpt text comes from the scanned file, and Excel or Sheets will
+    /// execute a cell beginning with = + - @ or a control character. Without
+    /// the leading apostrophe a crafted source file turns this export into
+    /// code execution on whoever opens it.
+    /// </summary>
+    private static string CsvCell(string value)
+    {
+        value ??= string.Empty;
+
+        if (value.Length > 0 && "=+-@\t\r".IndexOf(value[0]) >= 0)
+        {
+            value = "'" + value;
+        }
+
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
+    }
+
+    /// <summary>Drops every copy this page is holding.</summary>
+    private void Wipe()
+    {
+        findings = new List<Finding>();
+        counts = null;
+        extractionWarnings = Array.Empty<string>();
+        chosenFile = null;
+        loadedLabel = null;
+        pastedText = string.Empty;
+        sourceName = "pasted text";
+        sourceFormat = null;
+        sourceDetail = null;
+        errorMessage = null;
+        hasScanned = false;
+        copiedId = -1;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        try
+        {
+            if (firstRender)
+            {
+                jsModule = await _jsRuntime.InvokeAsync<IJSObjectReference>(
+                    "import",
+                    "./Components/Pages/SSNScanner/SSNScanner.razor.js");
+            }
+        }
+        catch (Exception)
+        {
+            //Log.Error(ex, "Uh oh! SSNScanner.razor -> OnAfterRenderAsync() has caught an exception!");
+        }
+    }
+
+    public void Dispose()
+    {
+        Wipe();
+        _ = DisposeJsModuleAsync();
+    }
+
+    private async Task DisposeJsModuleAsync()
+    {
+        if (jsModule is not null)
+        {
+            try
+            {
+                await jsModule.DisposeAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+    }
+
+    // ====================================================================
+    // model types
+    // ====================================================================
+
+    /// <summary>Confidence band a finding lands in after scoring.</summary>
+    private enum Band { Low, Medium, High }
+
+    /// <summary>Thrown when a file cannot be read, or is refused as hostile.</summary>
+    private sealed class ScanFileException : Exception
+    {
+        public ScanFileException(string message) : base(message) { }
+    }
+
+    /// <summary>What one piece of an excerpt is.</summary>
+    private enum SegKind
+    {
+        /// <summary>Ordinary surrounding text.</summary>
+        Text,
+
+        /// <summary>A keyword the scorer treats as a label signal.</summary>
+        Label,
+
+        /// <summary>A match that must be covered until revealed.</summary>
+        Ssn
+    }
+
+    /// <summary>One piece of an excerpt: text, a keyword, or a match to redact.</summary>
+    private readonly record struct Seg2(SegKind Kind, string Text)
+    {
+        public static Seg2 Plain(string text) => new(SegKind.Text, text);
+
+        public static Seg2 Keyword(string text) => new(SegKind.Label, text);
+
+        public static Seg2 Ssn(string text) => new(SegKind.Ssn, text);
+
+        public bool IsSsn => Kind == SegKind.Ssn;
+
+        /// <summary>The value, or its redacted form when masked is set.</summary>
+        public string Render(bool masked) => IsSsn && masked ? MaskValue(Text) : Text;
+    }
+
+    /// <summary>
+    /// Redacts a value while keeping the punctuation it was written with, so
+    /// the excerpt still shows the form the file uses. A bare 412701901
+    /// redacts to *****1901, not to ***-**-1901, which would invent dashes
+    /// that are not in the source.
+    /// </summary>
+    private static string MaskValue(string value)
+    {
+        static bool IsDigit(char c) => c >= '0' && c <= '9';
+
+        int digits = 0;
+        foreach (char c in value)
+        {
+            if (IsDigit(c)) { digits++; }
+        }
+
+        var sb = new StringBuilder(value.Length);
+        int seen = 0;
+
+        foreach (char c in value)
+        {
+            if (!IsDigit(c))
+            {
+                sb.Append(c);
+                continue;
+            }
+
+            seen++;
+            sb.Append(seen > digits - 4 ? c : '*');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Joins segments into a string, redacting values when masked.</summary>
+    private static string Flatten(IReadOnlyList<Seg2> segments, bool masked) =>
+        string.Concat(segments.Select(s => s.Render(masked))).Trim();
+
+    /// <summary>A candidate SSN with its score, reasons and surrounding context.</summary>
+    private sealed class Finding
+    {
+        public int Id { get; init; }
+        public bool IsItin { get; init; }
+        public string Value { get; init; } = string.Empty;
+        public string Masked => MaskValue(Value);
+
+        public int Line { get; init; }
+        public int Column { get; init; }
+
+        /// <summary>Human-readable position, e.g. "Members row 4" or "page 2".</summary>
+        public string Location { get; init; } = string.Empty;
+
+        public Band Confidence { get; init; }
+        public int Score { get; init; }
+        public IReadOnlyList<string> Reasons { get; init; } = Array.Empty<string>();
+
+        /// <summary>How many times this exact value appears in the file.</summary>
+        public int Occurrences { get; init; }
+
+        public IReadOnlyList<Seg2> Before { get; init; } = Array.Empty<Seg2>();
+        public IReadOnlyList<Seg2> After { get; init; } = Array.Empty<Seg2>();
+
+        /// <summary>Other people's SSNs sitting inside this excerpt.</summary>
+        public int Neighbors { get; init; }
+
+        public bool MoreBefore { get; init; }
+        public bool MoreAfter { get; init; }
+    }
+
+    /// <summary>Tally across a whole scan.</summary>
+    private sealed class Counts
+    {
+        public int High { get; init; }
+        public int Medium { get; init; }
+        public int Low { get; init; }
+        public int Total { get; init; }
+
+        /// <summary>Values someone had already redacted before the scan.</summary>
+        public int AlreadyMasked { get; init; }
+    }
+
+    /// <summary>Text pulled out of a file, plus where each line came from.</summary>
+    private sealed record Extracted(
+        string Text,
+        string Format,
+        string Detail,
+        IReadOnlyList<string> Locators,
+        IReadOnlyList<string> Warnings)
+    {
+        /// <summary>True only for CSV and XLSX, where line one is a column header.</summary>
+        public bool Tabular { get; init; }
+
+        /// <summary>Maps a one-based line number to its human-readable position.</summary>
+        public string Locate(int line) =>
+            line >= 1 && line <= Locators.Count ? Locators[line - 1] : $"line {line}";
+    }
+
+    // ====================================================================
+    // detection  -- weights and band thresholds below are the tuning surface
+    // ====================================================================
+
+    private const int DefaultContextChars = 30;
+
+    private const int WSepDash = 4;
+    private const int WSepSpace = 3;
+    private const int WSepDot = 2;
+    private const int WLabelAdjacent = 5;
+    private const int WLabelNear = 3;
+    private const int WDobNear = 2;
+    private const int WNegative = -4;
+    private const int WCurrency = -5;
+    private const int WCsvHeaderPos = 5;
+    private const int WCsvHeaderNeg = -5;
+    private const int WValid = 1;
+    private const int WInvalid = -5;
+    private const int WPlaceholder = -3;
+    private const int WRepeated = -2;
+
+    /// <summary>Score at or above this is High; at or above BandMedium is Medium.</summary>
+    private const int BandHigh = 6;
+    private const int BandMedium = 3;
+
+    /// <summary>
+    /// Ceiling on findings kept from one file. Without it a file that is
+    /// mostly SSN-shaped digits produces millions of cards and exhausts both
+    /// server memory and the browser.
+    /// </summary>
+    private const int MaxFindings = 5000;
+
+    private const int RepeatLimit = 10;        // occurrences before a value reads as a sentinel
+    private const int LabelAdjacentGap = 12;   // chars allowed between a label and the digits
+    private const int LabelWindow = 60;
+    private const int NegativeWindow = 40;
+
+    private const string Dashes = "-\u2013\u2014";   // hyphen, en dash, em dash
+
+    /// <summary>
+    /// Ceiling on any single regex match against uploaded text, so a
+    /// pathological input cannot pin the request thread indefinitely.
+    /// </summary>
+    private static readonly TimeSpan RegexLimit = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// 3-2-4 digits with an optional consistent separator. The dot guards are
+    /// conditional: they exclude IPs but not a sentence-ending SSN.
+    /// </summary>
+    private static readonly Regex SsnPattern = new(
+        @"(?<![0-9" + Dashes + @"])(?<![0-9]\.)" +
+        @"([0-9]{3})((?:[ \t]*[" + Dashes + @".][ \t]*|[ \t])?)" +
+        @"([0-9]{2})((?:[ \t]*[" + Dashes + @".][ \t]*|[ \t])?)" +
+        @"([0-9]{4})" +
+        @"(?![0-9" + Dashes + @"])(?!\.[0-9])",
+        RegexOptions.Compiled, RegexLimit);
+
+    /// <summary>Values someone has already redacted: XXX-XX-1234, ***-**-1234.</summary>
+    private static readonly Regex MaskedPattern = new(
+        @"(?<![0-9A-Za-z])[X*x#\u2022]{3}[- .]?[X*x#\u2022]{2}[- .]?([0-9]{4})(?![0-9])",
+        RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex PositiveLabel = new(
+        @"(ssn|ss\s*#|s\.s\.|social\s*security|socsec|soc\s*sec" +
+        @"|taxpayer\s*id|tax\s*id|\btin\b|\bitin\b|national\s*id" +
+        @"|so\s*bao\s*hiem\s*xa\s*hoi)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex NegativeLabel = new(
+        @"(invoice|order\s*(no|num|number|#)|account\s*(no|num|number|#)|acct" +
+        @"|phone|fax|mobile|\btel\b|policy\s*(no|number)|claim\s*(no|number)" +
+        @"|tracking|confirmation|reference|\bref\b|badge|employee\s*(id|no|#)" +
+        @"|\bein\b|routing|check\s*(no|number)|serial|asset\s*tag|ticket" +
+        @"|incident|purchase\s*order|\bpo\s*#|zip|postal|license|plate)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex DobLabel = new(
+        @"(\bdob\b|date\s*of\s*birth|birth\s*date|\bborn\b" +
+        @"|\b(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/(19|20)[0-9]{2}\b)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex CurrencyBefore =
+        new(@"[$\u20ac\u00a3\u00a5]\s*$", RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex CurrencyAfter =
+        new(@"^\s*(%|USD|EUR|dollars?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled, RegexLimit);
+
+    private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled, RegexLimit);
+
+    private static readonly char[] Delimiters = { ',', '\t', '|', ';' };
+
+    /// <summary>Valid ITIN group ranges: the 4th and 5th digits of a 9xx tax ID.</summary>
+    private static readonly (int Lo, int Hi)[] ItinGroups =
+        { (50, 65), (70, 88), (90, 92), (94, 99) };
+
+    private enum SepKind { None, Space, Dash, Dot }
+
+    private enum Proximity { None, Near, Adjacent }
+
+    private sealed record RawMatch(
+        int Start, int End, string Value, string Area, string Group,
+        string Serial, SepKind Sep, string Digits);
+
+    /// <summary>SSA allocation rules. Returns one reason per violation.</summary>
+    private static List<string> StructuralProblems(string area, string group, string serial)
+    {
+        var problems = new List<string>();
+
+        if (area == "000") { problems.Add("area 000 is never issued"); }
+        else if (area == "666") { problems.Add("area 666 is never issued"); }
+        else if (area[0] == '9') { problems.Add("area 900-999 is not an SSN"); }
+
+        if (group == "00") { problems.Add("group 00 is never issued"); }
+        if (serial == "0000") { problems.Add("serial 0000 is never issued"); }
+
+        return problems;
+    }
+
+    /// <summary>True when a 9xx number falls in a range the IRS issues as an ITIN.</summary>
+    private static bool IsItinNumber(string area, string group) =>
+        area[0] == '9' && int.TryParse(group, out int g) &&
+        ItinGroups.Any(r => g >= r.Lo && g <= r.Hi);
+
+    /// <summary>Names the placeholder pattern, or null when the digits look real.</summary>
+    private static string? LooksSynthetic(string digits)
+    {
+        if (digits.Distinct().Count() == 1) { return "all identical digits"; }
+
+        bool ascending = true, descending = true;
+        for (int i = 0; i < digits.Length - 1; i++)
+        {
+            int a = digits[i] - '0';
+            int b = digits[i + 1] - '0';
+            if (b != (a + 1) % 10) { ascending = false; }
+            if (b != (a + 9) % 10) { descending = false; }
+        }
+
+        if (ascending || descending) { return "sequential digit run"; }
+
+        return digits switch
+        {
+            "078051120" => "the Woolworth wallet number",
+            "219099999" => "an SSA advertising sample",
+            "457555462" => "a well-known sample number",
+            _ => null
+        };
+    }
+
+    /// <summary>Normalises a separator so " - " and "-" compare equal.</summary>
+    private static SepKind KindOf(string raw)
+    {
+        string stripped = raw.Trim(' ', '\t');
+        if (stripped.Length == 0) { return raw.Length > 0 ? SepKind.Space : SepKind.None; }
+        if (stripped == ".") { return SepKind.Dot; }
+        return SepKind.Dash;
+    }
+
+    /// <summary>How close a label sits. Adjacency wins over mere proximity.</summary>
+    private static (Proximity Where, string Text) Nearby(
+        Regex pattern, string text, int start, int end, int window)
+    {
+        int leadFrom = Math.Max(0, start - (LabelAdjacentGap + 24));
+        string lead = text[leadFrom..start];
+
+        foreach (Match m in pattern.Matches(lead))
+        {
+            if (lead.Length - (m.Index + m.Length) <= LabelAdjacentGap)
+            {
+                return (Proximity.Adjacent, m.Value);
+            }
+        }
+
+        int from = Math.Max(0, start - window);
+        int to = Math.Min(text.Length, end + window);
+        Match wide = pattern.Match(text[from..to]);
+        return wide.Success ? (Proximity.Near, wide.Value) : (Proximity.None, string.Empty);
+    }
+
+    /// <summary>Names the column a hit sits in, or null when the row does not fit the header.</summary>
+    private static string? CsvColumn(string text, int start)
+    {
+        int firstEnd = text.IndexOf('\n');
+        if (firstEnd < 0) { return null; }
+
+        string header = text[..firstEnd].Trim();
+        if (header.Length == 0) { return null; }
+
+        char delim = Delimiters.OrderByDescending(d => header.Count(c => c == d)).First();
+        int headerFields = header.Count(c => c == delim);
+        if (headerFields < 1) { return null; }
+
+        int lineStart = text.LastIndexOf('\n', Math.Max(0, start - 1)) + 1;
+        if (lineStart == 0) { return null; }          // the hit is in the header row
+
+        int lineEnd = text.IndexOf('\n', start);
+        if (lineEnd < 0) { lineEnd = text.Length; }
+
+        string line = text[lineStart..lineEnd];
+        if (line.Count(c => c == delim) != headerFields) { return null; }
+
+        string[] fields = header.Split(delim);
+        int index = 0, cursor = lineStart;
+        foreach (string chunk in line.Split(delim))
+        {
+            if (cursor <= start && start < cursor + chunk.Length + 1) { break; }
+            cursor += chunk.Length + 1;
+            index++;
+        }
+
+        return index < fields.Length ? fields[index].Trim().Trim('"') : null;
+    }
+
+    /// <summary>Weighs every signal for one candidate.</summary>
+    private static (Band Band, int Points, List<string> Reasons, bool Itin) ScoreMatch(
+        string text, RawMatch mt, int occurrences, bool tabular)
+    {
+        int points = 0;
+        var reasons = new List<string>();
+
+        switch (mt.Sep)
+        {
+            case SepKind.Dash: points += WSepDash; reasons.Add("3-2-4 dashed form"); break;
+            case SepKind.Space: points += WSepSpace; reasons.Add("3-2-4 spaced form"); break;
+            case SepKind.Dot: points += WSepDot; reasons.Add("3-2-4 dotted form"); break;
+            default: reasons.Add("bare 9-digit run"); break;
+        }
+
+        bool itin = IsItinNumber(mt.Area, mt.Group);
+        var problems = StructuralProblems(mt.Area, mt.Group, mt.Serial);
+
+        if (itin)
+        {
+            points += WValid;
+            reasons.Add("matches the ITIN range, still taxpayer PII");
+            foreach (string p in problems.Where(p => !p.StartsWith("area 900")))
+            {
+                points += WInvalid;
+                reasons.Add(p);
+            }
+        }
+        else if (problems.Count > 0)
+        {
+            points += WInvalid;
+            reasons.AddRange(problems);
+        }
+        else
+        {
+            points += WValid;
+        }
+
+        string? synthetic = LooksSynthetic(mt.Digits);
+        if (synthetic is not null)
+        {
+            points += WPlaceholder;
+            reasons.Add(synthetic);
+        }
+
+        if (occurrences >= RepeatLimit)
+        {
+            points += WRepeated;
+            reasons.Add($"repeats {occurrences} times in this file");
+        }
+
+        var (pos, _) = Nearby(PositiveLabel, text, mt.Start, mt.End, LabelWindow);
+        var (neg, negText) = Nearby(NegativeLabel, text, mt.Start, mt.End, NegativeWindow);
+
+        if (pos == Proximity.Adjacent)
+        {
+            points += WLabelAdjacent;
+            reasons.Add("SSN label directly in front");
+        }
+        else if (neg == Proximity.Adjacent)
+        {
+            points += WNegative;
+            reasons.Add($"reads as \"{negText.ToLowerInvariant()}\", not an SSN");
+        }
+        else if (pos == Proximity.Near)
+        {
+            points += WLabelNear;
+            reasons.Add("SSN label nearby");
+        }
+        else if (neg == Proximity.Near)
+        {
+            points += WNegative;
+            reasons.Add($"reads as \"{negText.ToLowerInvariant()}\", not an SSN");
+        }
+
+        string? header = tabular ? CsvColumn(text, mt.Start) : null;
+        if (header is not null)
+        {
+            string shown = header.Length <= 32 ? header : header[..32];
+            if (PositiveLabel.IsMatch(header))
+            {
+                points += WCsvHeaderPos;
+                reasons.Add($"column \"{shown}\"");
+            }
+            else if (NegativeLabel.IsMatch(header))
+            {
+                points += WCsvHeaderNeg;
+                reasons.Add($"column \"{shown}\"");
+            }
+        }
+
+        int dobFrom = Math.Max(0, mt.Start - LabelWindow);
+        int dobTo = Math.Min(text.Length, mt.End + LabelWindow);
+        if (DobLabel.IsMatch(text[dobFrom..dobTo]))
+        {
+            points += WDobNear;
+            reasons.Add("birth date alongside");
+        }
+
+        if (CurrencyBefore.IsMatch(text[Math.Max(0, mt.Start - 4)..mt.Start]) ||
+            CurrencyAfter.IsMatch(text[mt.End..Math.Min(text.Length, mt.End + 8)]))
+        {
+            points += WCurrency;
+            reasons.Add("reads as a monetary amount");
+        }
+
+        Band band = points >= BandHigh ? Band.High
+                  : points >= BandMedium ? Band.Medium
+                  : Band.Low;
+
+        return (band, points, reasons, itin);
+    }
+
+    /// <summary>Every span matching the SSN shape, in document order.</summary>
+    private static List<RawMatch> RawMatches(string text)
+    {
+        var found = new List<RawMatch>();
+
+        foreach (Match m in SsnPattern.Matches(text))
+        {
+            SepKind k1 = KindOf(m.Groups[2].Value);
+            SepKind k2 = KindOf(m.Groups[4].Value);
+            if (k1 != k2) { continue; }
+
+            string area = m.Groups[1].Value;
+            string group = m.Groups[3].Value;
+            string serial = m.Groups[5].Value;
+
+            found.Add(new RawMatch(m.Index, m.Index + m.Length, m.Value,
+                area, group, serial, k1, area + group + serial));
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Appends text, splitting out label keywords for highlighting. Reuses
+    /// PositiveLabel so a highlight always marks a scored signal.
+    /// </summary>
+    private static void AddText(List<Seg2> segs, string chunk)
+    {
+        int cursor = 0;
+
+        foreach (Match m in PositiveLabel.Matches(chunk))
+        {
+            if (m.Index > cursor) { segs.Add(Seg2.Plain(chunk[cursor..m.Index])); }
+            segs.Add(Seg2.Keyword(m.Value));
+            cursor = m.Index + m.Length;
+        }
+
+        if (cursor < chunk.Length) { segs.Add(Seg2.Plain(chunk[cursor..])); }
+    }
+
+    /// <summary>Slices a context window into text, keyword and SSN segments.</summary>
+    private static List<Seg2> Segments(
+        string text, int lo, int hi, List<RawMatch> matches, int from)
+    {
+        var segs = new List<Seg2>();
+        int cursor = lo;
+
+        // Matches are in document order. Start at the caller's cursor and stop
+        // at the end of the window; rescanning the whole list for every
+        // finding is quadratic and hangs on a file that is mostly SSNs.
+        for (int i = from; i < matches.Count; i++)
+        {
+            RawMatch m = matches[i];
+            if (m.Start >= hi) { break; }
+            if (m.End <= lo) { continue; }
+
+            int s = Math.Max(m.Start, lo);
+            int e = Math.Min(m.End, hi);
+            if (s > cursor) { AddText(segs, Whitespace.Replace(text[cursor..s], " ")); }
+
+            segs.Add(Seg2.Ssn(text[s..e]));
+            cursor = e;
+        }
+
+        if (cursor < hi) { AddText(segs, Whitespace.Replace(text[cursor..hi], " ")); }
+
+        if (segs.Count > 0 && segs[0].Kind == SegKind.Text)
+        {
+            segs[0] = Seg2.Plain(segs[0].Text.TrimStart());
+        }
+
+        if (segs.Count > 0 && segs[^1].Kind == SegKind.Text)
+        {
+            segs[^1] = Seg2.Plain(segs[^1].Text.TrimEnd());
+        }
+
+        return segs.Where(s => s.Kind != SegKind.Text || s.Text.Length > 0).ToList();
+    }
+
+    /// <summary>Widens a window so a character cut never slices a match in half.</summary>
+    private static (int Lo, int Hi) Snap(int lo, int hi, List<RawMatch> matches, int from)
+    {
+        for (int i = from; i < matches.Count; i++)
+        {
+            RawMatch m = matches[i];
+            if (m.Start >= hi) { break; }
+            if (m.End <= lo) { continue; }
+            lo = Math.Min(lo, m.Start);
+            hi = Math.Max(hi, m.End);
+        }
+
+        return (lo, hi);
+    }
+
+    /// <summary>Finds every candidate SSN with its score, reasons and context.</summary>
+    private static List<Finding> Scan(Extracted source, int contextChars)
+    {
+        string text = source.Text;
+        var matches = RawMatches(text);
+        if (matches.Count == 0) { return new List<Finding>(); }
+
+        // indexed once so a line number is a binary search, not a re-count
+        var newlines = new List<int>();
+        for (int i = text.IndexOf('\n'); i >= 0; i = text.IndexOf('\n', i + 1))
+        {
+            newlines.Add(i);
+        }
+
+        var tally = matches.GroupBy(m => m.Digits).ToDictionary(g => g.Key, g => g.Count());
+        int keep = Math.Min(matches.Count, MaxFindings);
+        var findings = new List<Finding>(keep);
+
+        // Window starts never move backwards, so one advancing cursor replaces
+        // a fresh scan of the match list per finding.
+        int cursor = 0;
+
+        for (int n = 0; n < keep; n++)
+        {
+            RawMatch mt = matches[n];
+            var (band, points, reasons, itin) =
+                ScoreMatch(text, mt, tally[mt.Digits], source.Tabular);
+
+            int windowLo = Math.Max(0, mt.Start - contextChars);
+            while (cursor < matches.Count && matches[cursor].End <= windowLo) { cursor++; }
+
+            var (lo, _) = Snap(windowLo, mt.Start, matches, cursor);
+            var (_, hi) = Snap(mt.End, Math.Min(text.Length, mt.End + contextChars),
+                               matches, cursor);
+
+            List<Seg2> before = Segments(text, lo, mt.Start, matches, cursor);
+            List<Seg2> after = Segments(text, mt.End, hi, matches, cursor);
+
+            int found = newlines.BinarySearch(mt.Start);
+            int priorLines = found >= 0 ? found : ~found;
+            int lastNewline = priorLines > 0 ? newlines[priorLines - 1] : -1;
+
+            findings.Add(new Finding
+            {
+                Id = n + 1,
+                IsItin = itin,
+                Value = mt.Value,
+                Line = priorLines + 1,
+                Column = mt.Start - lastNewline,
+                Location = source.Locate(priorLines + 1),
+                Confidence = band,
+                Score = points,
+                Reasons = reasons,
+                Occurrences = tally[mt.Digits],
+                Before = before,
+                After = after,
+                Neighbors = before.Concat(after).Count(s => s.IsSsn),
+                MoreBefore = lo > 0,
+                MoreAfter = hi < text.Length,
+            });
+        }
+
+        return findings;
+    }
+
+    /// <summary>Tallies findings by band, plus clustered and pre-masked counts.</summary>
+    private static Counts Summarize(IReadOnlyList<Finding> findings, string text) => new()
+    {
+        High = findings.Count(f => f.Confidence == Band.High),
+        Medium = findings.Count(f => f.Confidence == Band.Medium),
+        Low = findings.Count(f => f.Confidence == Band.Low),
+        Total = findings.Count,
+        AlreadyMasked = MaskedPattern.Matches(text).Count,
+    };
+
+    // ====================================================================
+    // file reading  -- rows are tab-joined so the column signal can find fields
+    // ====================================================================
+
+    // Decompression bomb ceilings; every inflate path below is bounded.
+    private const long MaxExpanded = 200L * 1024 * 1024;
+    private const long MaxOnePart = 60L * 1024 * 1024;
+    private const int MaxZipRatio = 200;
+
+    private const string NsMain =
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}";
+    private const string NsRel =
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}";
+
+    private static readonly string[] TextExts =
+        { ".txt", ".log", ".md", ".json", ".htm", ".html" };
+
+    private static readonly Regex PdfNumber = new(@"\G-?[\d.]+", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfOperator = new(@"\G[A-Za-z'""*]+", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfStreamStart = new("stream\r?\n", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfEncrypted = new(@"/Encrypt\b", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex PdfPage = new(@"/Type\s*/Page\b", RegexOptions.Compiled, RegexLimit);
+    private static readonly Regex NonHex = new("[^0-9A-Fa-f]", RegexOptions.Compiled, RegexLimit);
+
+    /// <summary>
+    /// File types refused before parsing. Nothing here is ever written to
+    /// disk or executed, so this is hygiene rather than exploit prevention:
+    /// it keeps program code out of server memory, off the pagefile and out
+    /// of any crash dump, and stops EDR alerting on a scanner process holding
+    /// PE bytes.
+    ///
+    /// Signatures, not extensions. Renaming evil.exe to data.txt defeats an
+    /// extension check completely.
+    /// </summary>
+    private static readonly (byte[] Magic, string Kind)[] BlockedSignatures =
+    {
+        (new byte[] { 0x4D, 0x5A }, "a Windows executable"),
+        (new byte[] { 0x7F, 0x45, 0x4C, 0x46 }, "a Linux executable"),
+        (new byte[] { 0xFE, 0xED, 0xFA, 0xCE }, "a macOS executable"),
+        (new byte[] { 0xFE, 0xED, 0xFA, 0xCF }, "a macOS executable"),
+        (new byte[] { 0xCE, 0xFA, 0xED, 0xFE }, "a macOS executable"),
+        (new byte[] { 0xCF, 0xFA, 0xED, 0xFE }, "a macOS executable"),
+        (new byte[] { 0xCA, 0xFE, 0xBA, 0xBE }, "compiled Java or a macOS binary"),
+        (new byte[] { 0x64, 0x65, 0x78, 0x0A }, "an Android executable"),
+        (new byte[] { 0x4D, 0x53, 0x43, 0x46 }, "a Windows cabinet"),
+        (new byte[] { 0x23, 0x21 }, "a script with a shebang"),
+    };
+
+    /// <summary>
+    /// Names Windows treats as executable regardless of content. Caught by
+    /// name because these are plain text and have no signature to match.
+    /// </summary>
+    private static readonly string[] BlockedExtensions =
+    {
+        ".exe", ".dll", ".sys", ".scr", ".com", ".pif", ".cpl", ".ocx", ".drv",
+        ".msi", ".msp", ".msc", ".jar", ".apk", ".app",
+        ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
+        ".wsf", ".wsh", ".hta", ".sh", ".reg", ".lnk", ".scf", ".inf",
+    };
+
+    /// <summary>Refuses program code before any parser touches the bytes.</summary>
+    private static void RejectExecutable(byte[] data, string name)
+    {
+        foreach ((byte[] magic, string kind) in BlockedSignatures)
+        {
+            if (data.Length < magic.Length) { continue; }
+
+            bool hit = true;
+            for (int i = 0; i < magic.Length; i++)
+            {
+                if (data[i] != magic[i]) { hit = false; break; }
+            }
+
+            if (hit)
+            {
+                throw new ScanFileException(
+                    $"This file starts with the signature of {kind}. Only data " +
+                    "files are accepted, whatever the file is named.");
+            }
+        }
+
+        foreach (string ext in BlockedExtensions)
+        {
+            if (name.EndsWith(ext, StringComparison.Ordinal))
+            {
+                throw new ScanFileException(
+                    $"A {ext} file is program code, not data, so it is not accepted.");
+            }
+        }
+    }
+
+    /// <summary>Reads a file's bytes into text, dispatching on signature then extension.</summary>
+    private static Extracted Extract(byte[] data, string filename)
+    {
+        string name = (filename ?? string.Empty).ToLowerInvariant();
+        RejectExecutable(data, name);
+
+        if (Starts(data, "%PDF") || name.EndsWith(".pdf")) { return ReadPdf(data); }
+
+        if (Starts(data, "PK") &&
+            (name.EndsWith(".xlsx") || name.EndsWith(".xlsm") || name.EndsWith(".xltx")))
+        {
+            return ReadXlsx(data);
+        }
+
+        if (name.EndsWith(".csv") || name.EndsWith(".tsv")) { return ReadCsv(data, name); }
+
+        if (name.EndsWith(".xml") || name.EndsWith(".config") || name.EndsWith(".xsd"))
+        {
+            return ReadXml(data);
+        }
+
+        if (Starts(data, "PK")) { return ReadZip(data); }
+
+        if (data.Take(4096).Contains((byte)0) && !TextExts.Any(name.EndsWith))
+        {
+            return ReadStrings(data);
+        }
+
+        return ReadPlainText(data);
+    }
+
+    /// <summary>Zip entries worth reading. Images, fonts and media are skipped.</summary>
+    private static readonly string[] ZipTextParts =
+        { ".xml", ".txt", ".csv", ".tsv", ".json", ".htm", ".html", ".md", ".rtf" };
+
+    /// <summary>
+    /// Zip entries with no user content. Skipped to keep excerpts clean; they
+    /// hold styles, themes and fonts rather than anything a person typed.
+    /// </summary>
+    private static readonly string[] ZipNoisyParts =
+        { "theme", "fonttable", "settings", "stylewitheffects", "presprops",
+          "viewprops", "tablestyles", "docprops/app.xml" };
+
+    /// <summary>
+    /// Reads any zip container by pulling text out of its parts. Covers .docx,
+    /// .pptx, .odt, .epub and plain archives of text files.
+    ///
+    /// Text is gathered per paragraph, not per run. Word splits a run at every
+    /// formatting boundary, so an SSN is routinely stored as two fragments;
+    /// reading runs separately would miss it.
+    /// </summary>
+    private static Extracted ReadZip(byte[] data)
+    {
+        using ZipArchive zip = OpenZip(data);
+
+        long total = zip.Entries.Sum(e => e.Length);
+        if (total > MaxExpanded)
+        {
+            throw new ScanFileException(
+                $"This archive expands to {total / 1048576.0:F0} MB in total, over " +
+                $"the {MaxExpanded / 1048576} MB limit.");
+        }
+
+        var lines = new List<string>();
+        var locators = new List<string>();
+        var warnings = new List<string>();
+        int skipped = 0;
+
+        foreach (ZipArchiveEntry entry in zip.Entries.OrderBy(e => e.FullName, StringComparer.Ordinal))
+        {
+            string name = entry.FullName;
+            string lower = name.ToLowerInvariant();
+
+            if (entry.Length == 0) { continue; }
+
+            if (!ZipTextParts.Any(lower.EndsWith) || ZipNoisyParts.Any(lower.Contains))
+            {
+                skipped++;
+                continue;
+            }
+
+            byte[] raw;
+            try
+            {
+                raw = ReadEntry(zip, name);
+            }
+            catch (ScanFileException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                skipped++;
+                continue;
+            }
+
+            if (lower.EndsWith(".xml"))
+            {
+                ReadXmlParagraphs(raw, name, lines, locators, warnings);
+            }
+            else
+            {
+                foreach (string line in Decode(raw).Split('\n'))
+                {
+                    if (line.Trim().Length == 0) { continue; }
+                    lines.Add(line.TrimEnd('\r'));
+                    locators.Add(name);
+                }
+            }
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ScanFileException(
+                "No readable text was found in this archive. Treat it as unread " +
+                "rather than clean.");
+        }
+
+        if (skipped > 0)
+        {
+            warnings.Add($"{skipped} part(s) of this archive were images, media or " +
+                         "settings and were not read.");
+        }
+
+        return new Extracted(string.Join('\n', lines), "archive",
+            $"{lines.Count} paragraph(s) from {zip.Entries.Count} part(s)",
+            locators, warnings);
+    }
+
+    /// <summary>
+    /// Streams one XML part, emitting one line per paragraph. Text inside a
+    /// paragraph is concatenated across runs, so a value split by formatting
+    /// is still seen whole.
+    /// </summary>
+    private static void ReadXmlParagraphs(
+        byte[] raw, string part, List<string> lines, List<string> locators,
+        List<string> warnings)
+    {
+        string head = Encoding.Latin1.GetString(raw, 0, Math.Min(raw.Length, 65536));
+        if (head.Contains("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            head.Contains("<!ENTITY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ScanFileException(
+                $"{part} declares an XML DTD or entity, which is an entity-expansion " +
+                "and external-reference risk, so the file is refused.");
+        }
+
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersFromEntities = 0,
+            IgnoreWhitespace = false,
+        };
+
+        var paragraph = new StringBuilder();
+        int index = 0;
+
+        void Flush()
+        {
+            string text = paragraph.ToString().Trim();
+            paragraph.Clear();
+            if (text.Length == 0) { return; }
+            lines.Add(text);
+            locators.Add($"{part} para {++index}");
+        }
+
+        try
+        {
+            using var reader = XmlReader.Create(new MemoryStream(raw, writable: false), settings);
+
+            while (reader.Read())
+            {
+                switch (reader.NodeType)
+                {
+                    case XmlNodeType.Text:
+                    case XmlNodeType.CDATA:
+                    case XmlNodeType.SignificantWhitespace:
+                        paragraph.Append(reader.Value);
+                        break;
+
+                    case XmlNodeType.Element:
+                        // a soft break or tab inside a paragraph is still a space
+                        if (reader.LocalName is "br" or "tab" or "cr")
+                        {
+                            paragraph.Append(' ');
+                        }
+
+                        break;
+
+                    case XmlNodeType.EndElement:
+                        // paragraph-level elements across docx, pptx and odt
+                        if (reader.LocalName is "p" or "tr" or "tc" or "si")
+                        {
+                            Flush();
+                        }
+
+                        break;
+                }
+            }
+
+            Flush();
+        }
+        catch (XmlException exc)
+        {
+            warnings.Add($"{part} is malformed and was skipped: {exc.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Pulls readable text runs out of an unrecognised format, the way the
+    /// strings utility does. Reads single-byte and UTF-16LE runs.
+    /// </summary>
+    private static Extracted ReadStrings(byte[] data)
+    {
+        const int minRun = 4;
+        var lines = new List<string>();
+        var locators = new List<string>();
+
+        void Flush(StringBuilder run, int startOffset)
+        {
+            if (run.Length >= minRun)
+            {
+                lines.Add(run.ToString());
+                locators.Add($"offset 0x{startOffset:X}");
+            }
+
+            run.Clear();
+        }
+
+        static bool Printable(byte b) => b == 0x09 || (b >= 0x20 && b <= 0x7E);
+
+        var ascii = new StringBuilder();
+        int asciiStart = 0;
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (Printable(data[i]))
+            {
+                if (ascii.Length == 0) { asciiStart = i; }
+                ascii.Append((char)data[i]);
+            }
+            else
+            {
+                Flush(ascii, asciiStart);
+            }
+        }
+
+        Flush(ascii, Math.Max(0, data.Length - ascii.Length));
+
+        // UTF-16LE. Both parities, since such text need not start on an even offset.
+        var wide = new StringBuilder();
+        int wideStart = 0;
+
+        for (int parity = 0; parity < 2; parity++)
+        {
+            for (int i = parity; i + 1 < data.Length; i += 2)
+            {
+                if (Printable(data[i]) && data[i + 1] == 0)
+                {
+                    if (wide.Length == 0) { wideStart = i; }
+                    wide.Append((char)data[i]);
+                }
+                else
+                {
+                    Flush(wide, wideStart);
+                }
+            }
+
+            Flush(wide, wideStart);
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ScanFileException(
+                "No readable text was found in this file, so there is nothing to " +
+                "scan. Treat this as unread rather than clean.");
+        }
+
+        return new Extracted(string.Join('\n', lines), "binary",
+            $"{lines.Count} text run(s)", locators, new[]
+            {
+                "This file is not a recognised text format, so only readable text " +
+                "runs were scanned. Anything compressed or encoded inside it was " +
+                "not read, and a clean result here is not proof the file is clean."
+            });
+    }
+
+    /// <summary>Decodes a file as flat text, one locator per line.</summary>
+    private static Extracted ReadPlainText(byte[] data)
+    {
+        string text = Decode(data);
+        int lines = text.Count(c => c == '\n') + 1;
+        return new Extracted(text, "text", $"{lines} lines",
+            Enumerable.Range(1, lines).Select(i => $"line {i}").ToList(),
+            Array.Empty<string>());
+    }
+
+    private static bool Starts(byte[] data, string prefix) =>
+        data.Length >= prefix.Length &&
+        Encoding.ASCII.GetString(data, 0, prefix.Length) == prefix;
+
+    /// <summary>Decodes as UTF-8, falling back to Latin-1 rather than throwing.</summary>
+    private static string Decode(byte[] data)
+    {
+        try
+        {
+            return new UTF8Encoding(false, throwOnInvalidBytes: true)
+                .GetString(data).TrimStart('\uFEFF');
+        }
+        catch (DecoderFallbackException)
+        {
+            return Encoding.Latin1.GetString(data);
+        }
+    }
+
+    // ---- csv -----------------------------------------------------------
+
+    /// <summary>Parses delimited text, sniffing the delimiter unless the name says .tsv.</summary>
+    private static Extracted ReadCsv(byte[] data, string filename)
+    {
+        string text = Decode(data);
+
+        char delim;
+        if (filename.EndsWith(".tsv"))
+        {
+            delim = '\t';
+        }
+        else
+        {
+            string sample = text[..Math.Min(text.Length, 8192)];
+            delim = Delimiters.OrderByDescending(d => sample.Count(c => c == d)).First();
+        }
+
+        var rows = new List<string>();
+        var locators = new List<string>();
+
+        foreach (List<string> fields in ParseDelimited(text, delim))
+        {
+            rows.Add(string.Join('\t', fields.Select(f => f.Replace('\t', ' '))));
+            locators.Add($"row {rows.Count}");
+        }
+
+        if (rows.Count == 0)
+        {
+            throw new ScanFileException("No rows could be read from this file.");
+        }
+
+        return new Extracted(string.Join('\n', rows), "csv",
+            $"{rows.Count} rows, delimiter '{delim}'", locators, Array.Empty<string>())
+        { Tabular = true };
+    }
+
+    /// <summary>Minimal RFC 4180 reader: quoted fields, doubled quotes, embedded newlines.</summary>
+    private static IEnumerable<List<string>> ParseDelimited(string text, char delim)
+    {
+        var row = new List<string>();
+        var field = new StringBuilder();
+        bool quoted = false, any = false;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            any = true;
+
+            if (quoted)
+            {
+                if (c == '"')
+                {
+                    if (i + 1 < text.Length && text[i + 1] == '"') { field.Append('"'); i++; }
+                    else { quoted = false; }
+                }
+                else
+                {
+                    field.Append(c);
+                }
+
+                continue;
+            }
+
+            if (c == '"' && field.Length == 0)
+            {
+                quoted = true;
+            }
+            else if (c == delim)
+            {
+                row.Add(field.ToString());
+                field.Clear();
+            }
+            else if (c == '\n')
+            {
+                row.Add(field.ToString().TrimEnd('\r'));
+                field.Clear();
+                yield return row;
+                row = new List<string>();
+                any = false;
+            }
+            else
+            {
+                field.Append(c);
+            }
+        }
+
+        if (any || field.Length > 0)
+        {
+            row.Add(field.ToString().TrimEnd('\r'));
+            yield return row;
+        }
+    }
+
+    // ---- xlsx ----------------------------------------------------------
+
+    /// <summary>Extracts every worksheet as tab-joined rows.</summary>
+    /// <summary>Opens a zip container, turning a corrupt archive into a clear message.</summary>
+    private static ZipArchive OpenZip(byte[] data)
+    {
+        try
+        {
+            return new ZipArchive(new MemoryStream(data, writable: false), ZipArchiveMode.Read);
+        }
+        catch (InvalidDataException)
+        {
+            throw new ScanFileException(
+                "This file starts like a zip but could not be opened. It may be " +
+                "corrupt or password protected.");
+        }
+    }
+
+    private static Extracted ReadXlsx(byte[] data)
+    {
+        using (ZipArchive zip = OpenZip(data))
+        {
+            long total = zip.Entries.Sum(e => e.Length);
+            if (total > MaxExpanded)
+            {
+                throw new ScanFileException(
+                    $"This workbook expands to {total / 1048576.0:F0} MB in total, " +
+                    $"over the {MaxExpanded / 1048576} MB limit.");
+            }
+
+            List<string> shared = SharedStrings(zip);
+            List<(string Name, string Path)> sheets = SheetOrder(zip);
+            if (sheets.Count == 0)
+            {
+                throw new ScanFileException("No worksheets found in this workbook.");
+            }
+
+            var lines = new List<string>();
+            var locators = new List<string>();
+            var warnings = new List<string>();
+            int numericCells = 0;
+
+            foreach ((string name, string path) in sheets)
+            {
+                XElement root;
+                try
+                {
+                    root = SafeXml(ReadEntry(zip, path), $"sheet {name}");
+                }
+                catch (ScanFileException)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    warnings.Add($"Sheet {name} could not be parsed and was skipped.");
+                    continue;
+                }
+
+                foreach (XElement row in root.Descendants(NsMain + "row"))
+                {
+                    string rowNum = row.Attribute("r")?.Value ?? (lines.Count + 1).ToString();
+                    var cells = new List<string>();
+
+                    foreach (XElement cell in row.Descendants(NsMain + "c"))
+                    {
+                        string value = CellText(cell, shared);
+                        if (value.Length > 0 && cell.Attribute("t") is null) { numericCells++; }
+                        cells.Add(value.Replace('\t', ' ').Replace('\n', ' '));
+                    }
+
+                    lines.Add(string.Join('\t', cells));
+                    locators.Add($"{name} row {rowNum}");
+                }
+            }
+
+            if (lines.Count == 0)
+            {
+                throw new ScanFileException("The workbook has no rows with content.");
+            }
+
+            if (numericCells > 0)
+            {
+                warnings.Add(
+                    "Some cells are stored as numbers, not text. Excel drops leading " +
+                    "zeros there, so an SSN beginning with 0 may appear as 8 digits " +
+                    "and will not match.");
+            }
+
+            return new Extracted(string.Join('\n', lines), "xlsx",
+                $"{sheets.Count} sheet(s), {lines.Count} rows", locators, warnings)
+            { Tabular = true };
+        }
+    }
+
+    /// <summary>Reads one zip entry with size and compression-ratio ceilings.</summary>
+    private static byte[] ReadEntry(ZipArchive zip, string path)
+    {
+        ZipArchiveEntry entry = zip.GetEntry(path) ?? throw new FileNotFoundException(path);
+
+        if (entry.Length > MaxOnePart)
+        {
+            throw new ScanFileException(
+                $"{path} expands to {entry.Length / 1048576.0:F0} MB. Refusing to " +
+                "open a file that inflates this far.");
+        }
+
+        if (entry.CompressedLength > 0 &&
+            entry.Length / (double)entry.CompressedLength > MaxZipRatio)
+        {
+            throw new ScanFileException(
+                $"{path} expands {entry.Length / (double)entry.CompressedLength:F0}x its " +
+                "stored size, which is characteristic of a decompression bomb rather " +
+                "than a spreadsheet.");
+        }
+
+        using Stream stream = entry.Open();
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
+    }
+
+    /// <summary>Parses a workbook part, refusing DTDs and entities outright.</summary>
+    private static XElement SafeXml(byte[] raw, string what)
+    {
+        string head = Encoding.Latin1.GetString(raw, 0, Math.Min(raw.Length, 65536));
+        if (head.Contains("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            head.Contains("<!ENTITY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ScanFileException(
+                $"{what} declares an XML DTD or entity. Legitimate spreadsheets do " +
+                "not, so this file is refused.");
+        }
+
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersFromEntities = 0,
+        };
+
+        try
+        {
+            using var reader = XmlReader.Create(new MemoryStream(raw), settings);
+            return XElement.Load(reader);
+        }
+        catch (XmlException exc)
+        {
+            throw new ScanFileException($"{what} is malformed: {exc.Message}");
+        }
+    }
+
+    /// <summary>Reads the string table, flattening rich-text runs into one value.</summary>
+    private static List<string> SharedStrings(ZipArchive zip)
+    {
+        try
+        {
+            return SafeXml(ReadEntry(zip, "xl/sharedStrings.xml"), "sharedStrings.xml")
+                .Elements()
+                .Select(si => string.Concat(si.Descendants(NsMain + "t").Select(t => t.Value)))
+                .ToList();
+        }
+        catch (FileNotFoundException)
+        {
+            return new List<string>();
+        }
+    }
+
+    /// <summary>Sheet names in workbook order, paired with their part paths.</summary>
+    private static List<(string, string)> SheetOrder(ZipArchive zip)
+    {
+        var sheets = new List<(string, string)>();
+
+        try
+        {
+            XElement wb = SafeXml(ReadEntry(zip, "xl/workbook.xml"), "workbook.xml");
+            XElement rels = SafeXml(ReadEntry(zip, "xl/_rels/workbook.xml.rels"),
+                "workbook.xml.rels");
+
+            Dictionary<string, string> target = rels.Elements()
+                .Where(r => r.Attribute("Id") is not null)
+                .ToDictionary(r => r.Attribute("Id")!.Value,
+                              r => r.Attribute("Target")?.Value ?? string.Empty);
+
+            foreach (XElement sheet in wb.Descendants(NsMain + "sheet"))
+            {
+                string? rid = sheet.Attribute(NsRel + "id")?.Value;
+                if (rid is null || !target.TryGetValue(rid, out string? path)) { continue; }
+
+                path = path.StartsWith('/') ? path[1..]
+                     : path.StartsWith("xl/") ? path
+                     : "xl/" + path;
+
+                if (zip.GetEntry(path) is not null)
+                {
+                    sheets.Add((sheet.Attribute("name")?.Value ?? "sheet", path));
+                }
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            foreach (ZipArchiveEntry e in zip.Entries
+                         .Where(e => e.FullName.StartsWith("xl/worksheets/"))
+                         .OrderBy(e => e.FullName))
+            {
+                sheets.Add((e.Name, e.FullName));
+            }
+        }
+
+        return sheets;
+    }
+
+    /// <summary>Resolves one cell to text, whether shared, inline, or numeric.</summary>
+    private static string CellText(XElement cell, List<string> shared)
+    {
+        string? kind = cell.Attribute("t")?.Value;
+
+        if (kind == "inlineStr")
+        {
+            return string.Concat(cell.Descendants(NsMain + "t").Select(t => t.Value));
+        }
+
+        XElement? value = cell.Element(NsMain + "v");
+        if (value is null) { return string.Empty; }
+
+        if (kind == "s")
+        {
+            return int.TryParse(value.Value, out int idx) && idx >= 0 && idx < shared.Count
+                ? shared[idx]
+                : string.Empty;
+        }
+
+        return value.Value;
+    }
+
+    // ---- xml -----------------------------------------------------------
+
+    /// <summary>
+    /// Reads XML as one "name: value" line per text node, attribute and
+    /// comment, keyed by element path. The name prefix lets &lt;SSN&gt; score
+    /// as a label. DTDs and entities are refused as an XXE vector.
+    /// </summary>
+    private static Extracted ReadXml(byte[] data)
+    {
+        string head = Encoding.Latin1.GetString(data, 0, Math.Min(data.Length, 65536));
+        if (head.Contains("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            head.Contains("<!ENTITY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ScanFileException(
+                "This XML declares a DTD or entity. Those are an entity-expansion " +
+                "and external-reference risk and are not needed by a data export, " +
+                "so the file is refused.");
+        }
+
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersFromEntities = 0,
+            IgnoreWhitespace = true,
+            IgnoreProcessingInstructions = true,
+        };
+
+        var lines = new List<string>();
+        var locators = new List<string>();
+        var warnings = new List<string>();
+        var path = new Stack<string>();
+
+        string CurrentPath() => string.Join('/', path.Reverse());
+
+        try
+        {
+            using var reader = XmlReader.Create(new MemoryStream(data, writable: false), settings);
+
+            while (reader.Read())
+            {
+                switch (reader.NodeType)
+                {
+                    case XmlNodeType.Element:
+                        bool empty = reader.IsEmptyElement;
+                        path.Push(reader.Name);
+
+                        if (reader.HasAttributes)
+                        {
+                            string owner = CurrentPath();
+                            while (reader.MoveToNextAttribute())
+                            {
+                                if (reader.Value.Trim().Length == 0) { continue; }
+                                lines.Add($"{reader.Name}: {reader.Value.Trim()}");
+                                locators.Add($"{owner}/@{reader.Name}");
+                            }
+
+                            reader.MoveToElement();
+                        }
+
+                        if (empty) { path.Pop(); }
+                        break;
+
+                    case XmlNodeType.EndElement:
+                        if (path.Count > 0) { path.Pop(); }
+                        break;
+
+                    case XmlNodeType.Text:
+                    case XmlNodeType.CDATA:
+                        if (reader.Value.Trim().Length == 0) { break; }
+                        lines.Add($"{(path.Count > 0 ? path.Peek() : "value")}: " +
+                                  reader.Value.Trim());
+                        locators.Add(CurrentPath());
+                        break;
+
+                    case XmlNodeType.Comment:
+                        if (reader.Value.Trim().Length == 0) { break; }
+                        lines.Add($"comment: {reader.Value.Trim()}");
+                        locators.Add($"{CurrentPath()} (comment)");
+                        break;
+                }
+            }
+        }
+        catch (XmlException exc)
+        {
+            // malformed exports are common; scan them as text and say so
+            Extracted plain = ReadPlainText(data);
+            return plain with
+            {
+                Format = "xml",
+                Detail = $"{plain.Detail}, read as flat text",
+                Warnings = new[]
+                {
+                    "This XML is malformed and was scanned as plain text instead: " +
+                    exc.Message + " Positions below are line numbers, not element paths."
+                }
+            };
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new ScanFileException("This XML document has no text content.");
+        }
+
+        return new Extracted(string.Join('\n', lines), "xml",
+            $"{lines.Count} value(s)", locators, warnings);
+    }
+
+    // ---- pdf -----------------------------------------------------------
+
+    /// <summary>
+    /// Extracts PDF text by inflating its content streams. Best effort: no
+    /// OCR. A clean zero is not proof a PDF is clean.
+    /// </summary>
+    private static Extracted ReadPdf(byte[] data)
+    {
+        string latin = Encoding.Latin1.GetString(data);
+
+        if (PdfEncrypted.IsMatch(latin))
+        {
+            throw new ScanFileException(
+                "This PDF is encrypted. Decrypt or print it to a new PDF first.");
+        }
+
+        int pageCount = PdfPage.Matches(latin).Count;
+        var pages = new List<string>();
+        var warnings = new List<string>();
+        int rawStreams = 0;
+
+        foreach (Match m in PdfStreamStart.Matches(latin))
+        {
+            int start = m.Index + m.Length;
+            int end = latin.IndexOf("endstream", start, StringComparison.Ordinal);
+            if (end < 0) { continue; }
+
+            int stop = end;
+            while (stop > start &&
+                   (data[stop - 1] == (byte)'\r' || data[stop - 1] == (byte)'\n'))
+            {
+                stop--;
+            }
+
+            byte[] blob = data[start..stop];
+            byte[]? inflated = TryInflate(blob);
+
+            if (inflated is null)
+            {
+                rawStreams++;
+                string probe = Encoding.Latin1.GetString(blob);
+                if (!probe.Contains("Tj") && !probe.Contains("TJ")) { continue; }
+                inflated = blob;
+            }
+
+            string text = ExtractPdfStrings(Encoding.Latin1.GetString(inflated));
+            if (text.Trim().Length > 0) { pages.Add(text); }
+        }
+
+        if (pages.Count == 0)
+        {
+            throw new ScanFileException(pageCount > 0
+                ? $"No text layer found across {pageCount} page(s). This is most " +
+                  "likely a scan, which needs OCR before it can be scanned for SSNs."
+                : "No readable text found in this PDF.");
+        }
+
+        if (pageCount > 0 && pages.Count != pageCount)
+        {
+            warnings.Add($"Recovered {pages.Count} text block(s) from {pageCount} " +
+                         "page(s); page numbers below are approximate.");
+        }
+
+        if (rawStreams > 0)
+        {
+            warnings.Add($"{rawStreams} stream(s) used a compression filter this " +
+                         "extractor does not implement and were skipped.");
+        }
+
+        warnings.Add("PDF text extraction is best-effort. Confirm anything important " +
+                     "against the original document.");
+
+        var lines = new List<string>();
+        var locators = new List<string>();
+        for (int p = 0; p < pages.Count; p++)
+        {
+            foreach (string line in pages[p].Split('\n'))
+            {
+                lines.Add(line);
+                locators.Add($"page {p + 1}");
+            }
+        }
+
+        return new Extracted(string.Join('\n', lines), "pdf",
+            $"{pages.Count} page block(s)", locators, warnings);
+    }
+
+    /// <summary>Bounded inflate. Null when not deflate, or past the size ceiling.</summary>
+    private static byte[]? TryInflate(byte[] blob)
+    {
+        try
+        {
+            using var input = new MemoryStream(blob);
+
+            // skip the zlib header DeflateStream does not expect
+            if (blob.Length > 2 && blob[0] == 0x78) { input.Seek(2, SeekOrigin.Begin); }
+
+            using var deflate = new DeflateStream(input, CompressionMode.Decompress);
+            using var output = new MemoryStream();
+
+            byte[] buffer = new byte[81920];
+            long written = 0;
+            int read;
+
+            while ((read = deflate.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                written += read;
+                if (written > MaxOnePart) { return null; }
+                output.Write(buffer, 0, read);
+            }
+
+            return output.Length > 0 ? output.ToArray() : null;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Walks a content stream into text, reading a large negative kern as a space.</summary>
+    private static string ExtractPdfStrings(string content)
+    {
+        var output = new StringBuilder();
+        var pending = new StringBuilder();
+        List<string>? arrayParts = null;
+        int i = 0;
+
+        void Emit(string s)
+        {
+            if (arrayParts is not null) { arrayParts.Add(s); }
+            else { pending.Append(s); }
+        }
+
+        while (i < content.Length)
+        {
+            char ch = content[i];
+
+            if (ch == '(')
+            {
+                i++;
+                int depth = 1;
+                var buf = new StringBuilder();
+
+                while (i < content.Length && depth > 0)
+                {
+                    char c = content[i];
+
+                    if (c == '\\' && i + 1 < content.Length)
+                    {
+                        char next = content[i + 1];
+                        buf.Append(next switch
+                        {
+                            'n' => '\n', 'r' => '\r', 't' => '\t',
+                            'b' => '\b', 'f' => '\f', _ => next
+                        });
+                        i += 2;
+                        continue;
+                    }
+
+                    if (c == '(') { depth++; }
+                    else if (c == ')')
+                    {
+                        depth--;
+                        if (depth == 0) { i++; break; }
+                    }
+
+                    buf.Append(c);
+                    i++;
+                }
+
+                Emit(buf.ToString());
+                continue;
+            }
+
+            if (ch == '<' && i + 1 < content.Length && content[i + 1] != '<')
+            {
+                int close = content.IndexOf('>', i);
+                if (close < 0) { break; }
+
+                string hex = NonHex.Replace(content[(i + 1)..close], "");
+                if (hex.Length % 2 == 1) { hex += "0"; }
+                Emit(DecodeHexString(Convert.FromHexString(hex)));
+                i = close + 1;
+                continue;
+            }
+
+            if (ch == '[') { arrayParts = new List<string>(); i++; continue; }
+
+            if (ch == ']')
+            {
+                if (arrayParts is not null)
+                {
+                    pending.Append(string.Concat(arrayParts));
+                    arrayParts = null;
+                }
+
+                i++;
+                continue;
+            }
+
+            if (arrayParts is not null && (char.IsDigit(ch) || ch is '-' or '.'))
+            {
+                Match num = PdfNumber.Match(content, i);
+                if (num.Success)
+                {
+                    if (double.TryParse(num.Value, out double kern) && kern < -150)
+                    {
+                        arrayParts.Add(" ");
+                    }
+
+                    i += num.Length;
+                    continue;
+                }
+            }
+
+            Match op = PdfOperator.Match(content, i);
+            if (op.Success)
+            {
+                switch (op.Value)
+                {
+                    case "Tj":
+                    case "TJ":
+                    case "'":
+                    case "\"":
+                        output.Append(pending);
+                        pending.Clear();
+                        if (op.Value is "'" or "\"") { output.Append('\n'); }
+                        break;
+
+                    case "Td":
+                    case "TD":
+                    case "T*":
+                    case "ET":
+                        output.Append('\n');
+                        pending.Clear();
+                        break;
+                }
+
+                i += op.Length;
+                continue;
+            }
+
+            i++;
+        }
+
+        return output.ToString();
+    }
+
+    /// <summary>Hex strings are bytes; simple fonts give Latin-1, CID fonts UTF-16BE.</summary>
+    private static string DecodeHexString(byte[] raw)
+    {
+        if (raw.Length >= 2 && raw[0] == 0xFE && raw[1] == 0xFF)
+        {
+            return Encoding.BigEndianUnicode.GetString(raw, 2, raw.Length - 2);
+        }
+
+        if (raw.Length % 2 == 0 && raw.Length > 0 &&
+            raw.Where((_, i) => i % 2 == 0).Count(b => b == 0) > raw.Length / 4)
+        {
+            return Encoding.BigEndianUnicode.GetString(raw);
+        }
+
+        return Encoding.Latin1.GetString(raw);
+    }
+}
